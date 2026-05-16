@@ -28,7 +28,7 @@ func main() {
 	}
 
 	params := openai.ChatCompletionNewParams{
-		Model: "kimi-k2.6",
+		Model: "deepseek-v4-pro",
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage("请使用工具解决问题"),
 			openai.UserMessage("今天广州的天气怎么样"),
