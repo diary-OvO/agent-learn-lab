@@ -1,3 +1,38 @@
+# Environment files
 .env
 .env.*
 !.env.example
+
+# Local IDE/editor state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Go build/test artifacts
+bin/
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local linked knowledge vault directory
+01-Agent Loop项目沉淀/
