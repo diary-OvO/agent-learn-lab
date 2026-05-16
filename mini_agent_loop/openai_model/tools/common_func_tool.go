@@ -1,8 +1,8 @@
 package tools
 
 import (
-	v1 "AgentLoop/mini_agent_loop/openai/tools/v1"
-	v2 "AgentLoop/mini_agent_loop/openai/tools/v2"
+	v1 "AgentLoop/mini_agent_loop/openai_model/tools/v1"
+	v2 "AgentLoop/mini_agent_loop/openai_model/tools/v2"
 	"context"
 	"encoding/json"
 	"fmt"
