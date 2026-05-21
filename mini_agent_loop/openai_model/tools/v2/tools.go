@@ -50,6 +50,19 @@ func (b *ToolBox) Execute(ctx context.Context, call ToolCall) (string, error) {
 	return tool.Call(ctx, call.Arguments)
 }
 
+func (b *ToolBox) Schemas() []ToolSchema {
+	if b == nil || len(b.tools) == 0 {
+		return nil
+	}
+
+	schemas := make([]ToolSchema, 0, len(b.tools))
+	for _, tool := range b.tools {
+		schemas = append(schemas, tool.Schema())
+	}
+
+	return schemas
+}
+
 // FunctionTool 是 Tool interface 的一种实现。
 // 能够将一个go的函数包装成一个tool
 type FunctionTool struct {

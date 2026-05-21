@@ -2,6 +2,8 @@ package openai_model
 
 import (
 	v1 "AgentLoop/mini_agent_loop/openai_model/tools/v1"
+	v2 "AgentLoop/mini_agent_loop/openai_model/tools/v2"
+	v3 "AgentLoop/mini_agent_loop/openai_model/tools/v3"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -10,6 +12,12 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
+
+type toolSchema struct {
+	Name        string
+	Description string
+	Parameters  map[string]any
+}
 
 // toFunctionParameters 把通用 map 形式的 JSON Schema 转成 openai_model-go
 // 需要的 FunctionParameters。
@@ -34,14 +42,62 @@ func toFunctionParameters(schema map[string]any) (shared.FunctionParameters, err
 
 // 排序
 // 为了让请求稳定、便于调试和缓存命中，这里先按名字排序再输出。
-func sortToolSchemas(schemas []v1.ToolSchema) []v1.ToolSchema {
-	sorted := append([]v1.ToolSchema(nil), schemas...)
+func sortToolSchemas(schemas []toolSchema) []toolSchema {
+	sorted := append([]toolSchema(nil), schemas...)
 
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Name < sorted[j].Name
 	})
 
 	return sorted
+}
+
+func fromV1ToolSchemas(schemas []v1.ToolSchema) []toolSchema {
+	if len(schemas) == 0 {
+		return nil
+	}
+
+	out := make([]toolSchema, 0, len(schemas))
+	for _, schema := range schemas {
+		out = append(out, toolSchema{
+			Name:        schema.Name,
+			Description: schema.Description,
+			Parameters:  schema.Parameters,
+		})
+	}
+	return out
+}
+
+func fromV2ToolSchemas(schemas []v2.ToolSchema) []toolSchema {
+	if len(schemas) == 0 {
+		return nil
+	}
+
+	out := make([]toolSchema, 0, len(schemas))
+	for _, schema := range schemas {
+		out = append(out, toolSchema{
+			Name:        schema.Name,
+			Description: schema.Description,
+			Parameters:  schema.Parameters,
+		})
+	}
+	return out
+}
+
+func fromV3ToolSchemas(schemas []v3.ToolSchema) []toolSchema {
+	if len(schemas) == 0 {
+		return nil
+	}
+
+	out := make([]toolSchema, 0, len(schemas))
+	for _, schema := range schemas {
+		out = append(out, toolSchema{
+			Name:        schema.Name,
+			Description: schema.Description,
+			Parameters:  schema.Parameters,
+		})
+	}
+	return out
 }
 
 /* 贴一段借鉴来的代码实现 出自项目trpc-agent-go
@@ -80,6 +136,20 @@ func convertTools(tools []ToolSchema) []openai_model.ChatCompletionToolParam {
 
 // ToChatCompletionTools 把内部 ToolSchema 列表转换成 OpenAI Chat.Completions tools
 func ToChatCompletionTools(schemas []v1.ToolSchema) ([]openai.ChatCompletionToolUnionParam, error) {
+	return toChatCompletionTools(fromV1ToolSchemas(schemas))
+}
+
+// ToChatCompletionToolsV2 把 v2 ToolSchema 列表转换成 OpenAI Chat.Completions tools
+func ToChatCompletionToolsV2(schemas []v2.ToolSchema) ([]openai.ChatCompletionToolUnionParam, error) {
+	return toChatCompletionTools(fromV2ToolSchemas(schemas))
+}
+
+// ToChatCompletionToolsV3 把 v3 ToolSchema 列表转换成 OpenAI Chat.Completions tools
+func ToChatCompletionToolsV3(schemas []v3.ToolSchema) ([]openai.ChatCompletionToolUnionParam, error) {
+	return toChatCompletionTools(fromV3ToolSchemas(schemas))
+}
+
+func toChatCompletionTools(schemas []toolSchema) ([]openai.ChatCompletionToolUnionParam, error) {
 	if len(schemas) == 0 {
 		return nil, nil
 	}
@@ -106,6 +176,20 @@ func ToChatCompletionTools(schemas []v1.ToolSchema) ([]openai.ChatCompletionTool
 
 // ToResponseTools 把内部 ToolSchema 列表转换成 OpenAI Responses tools
 func ToResponseTools(schemas []v1.ToolSchema) ([]responses.ToolUnionParam, error) {
+	return toResponseTools(fromV1ToolSchemas(schemas))
+}
+
+// ToResponseToolsV2 把 v2 ToolSchema 列表转换成 OpenAI Responses tools
+func ToResponseToolsV2(schemas []v2.ToolSchema) ([]responses.ToolUnionParam, error) {
+	return toResponseTools(fromV2ToolSchemas(schemas))
+}
+
+// ToResponseToolsV3 把 v3 ToolSchema 列表转换成 OpenAI Responses tools
+func ToResponseToolsV3(schemas []v3.ToolSchema) ([]responses.ToolUnionParam, error) {
+	return toResponseTools(fromV3ToolSchemas(schemas))
+}
+
+func toResponseTools(schemas []toolSchema) ([]responses.ToolUnionParam, error) {
 	if len(schemas) == 0 {
 		return nil, nil
 	}
