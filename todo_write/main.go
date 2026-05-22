@@ -115,7 +115,7 @@ func runAgentLoop(
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
-			fmt.Println(preview(result, 200))
+			fmt.Println(formatToolResult(toolCall.Function.Name, result))
 
 			if toolCall.Function.Name == "todo" {
 				usedTodo = true
@@ -149,4 +149,19 @@ func preview(s string, limit int) string {
 		return s
 	}
 	return string(runes[:limit]) + "\n...output truncated"
+}
+
+func formatToolResult(toolName string, result string) string {
+	if toolName == "todo" {
+		return formatTodoProgress(result)
+	}
+	return preview(result, 200)
+}
+
+func formatTodoProgress(result string) string {
+	result = strings.TrimSpace(result)
+	if result == "" {
+		result = "No todos."
+	}
+	return "📌 当前 TodoList 进度\n" + result
 }
