@@ -2,6 +2,7 @@ package main
 
 import (
 	"AgentLoop/00-mini_agent_loop/openai_model"
+	"AgentLoop/00-mini_agent_loop/openai_model/hooks"
 	"AgentLoop/00-mini_agent_loop/openai_model/tools"
 	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
@@ -39,6 +40,14 @@ func main() {
 	reader := bufio.NewReader(os.Stdin)
 	permission := openai_model.NewPermissionCheckerWithReader(reader)
 
+	workdir, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	//初始化hookBus
+	hookBus := hooks.NewHookBus()
+	openai_model.RegisterS04DefaultHooks(hookBus, permission, workdir)
+
 	system := "你是一个智能体猫猫娘，拥有 Bash 工具能力，回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结），能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。"
 
 	messages := []openai.ChatCompletionMessageParamUnion{
@@ -60,9 +69,11 @@ func main() {
 			strings.EqualFold(query, "exit") {
 			break
 		}
+		//输入前注入
+		_ = hookBus.TriggerUserPromptSubmit(ctx, query)
 
 		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, permission, messages, 20)
+		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, messages, 20)
 		if err != nil {
 			panic(err)
 		}
@@ -85,7 +96,7 @@ func runAgentLoop(
 	client openai.Client,
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
-	permission *openai_model.PermissionChecker,
+	hookBus *hooks.HookBus,
 	messages []openai.ChatCompletionMessageParamUnion,
 	maxSteps int,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
@@ -94,6 +105,8 @@ func runAgentLoop(
 		Messages: messages,
 		Tools:    toolboxSchema,
 	}
+	//新增工具调用次数统计
+	toolCallCount := 0
 
 	for step := 0; step < maxSteps; step++ {
 		completion, err := client.Chat.Completions.New(ctx, params)
@@ -105,6 +118,20 @@ func runAgentLoop(
 		messages = append(messages, msg.ToParam())
 
 		if len(msg.ToolCalls) == 0 {
+			//结束前注入
+			force := hookBus.TriggerStop(ctx, hooks.StopContext{
+				MessageCount:  len(messages),
+				ToolCallCount: toolCallCount,
+			})
+
+			// 如果 Stop hook 返回非空内容，可以把它作为 user message 继续送回模型。
+			// 默认 SummaryHook 返回空字符串，所以一般会直接退出。
+			if force != "" {
+				messages = append(messages, openai.UserMessage(force))
+				params.Messages = messages
+				continue
+			}
+
 			return msg.Content, messages, nil
 		}
 
@@ -116,15 +143,13 @@ func runAgentLoop(
 
 			agentui.PrintToolCall(call)
 
-			//S03的核心要点，执行前确认-》真正被加进来的东西
-
-			if permission != nil && !permission.CheckPermission(ctx, call) {
-				result := "Permission denied."
+			//工具执行前注入
+			blocked := hookBus.TriggerPreToolUse(ctx, call)
+			if blocked != "" {
+				result := blocked
 
 				fmt.Printf("\033[31m%s\033[0m\n", result)
 
-				// 即使拒绝，也必须返回一个 ToolMessage。
-				// 因为模型已经发起了 tool call，后续消息需要给这个 tool_call_id 一个结果。
 				messages = append(
 					messages,
 					openai.ToolMessage(result, toolCall.ID),
@@ -138,7 +163,8 @@ func runAgentLoop(
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
-
+			//工具结束前注入
+			_ = hookBus.TriggerPostToolUse(ctx, call, result)
 			messages = append(
 				messages,
 				openai.ToolMessage(result, toolCall.ID),
