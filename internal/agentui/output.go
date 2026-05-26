@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	v2 "AgentLoop/mini_agent_loop/openai_model/tools/v2"
+	v2 "AgentLoop/00-mini_agent_loop/openai_model/tools/v2"
 )
 
 // PrintToolCall 打印工具名，并输出该工具对应的额外调用信息。

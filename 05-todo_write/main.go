@@ -1,10 +1,10 @@
 package main
 
 import (
+	"AgentLoop/00-mini_agent_loop/openai_model"
+	"AgentLoop/00-mini_agent_loop/openai_model/tools"
 	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
-	"AgentLoop/mini_agent_loop/openai_model"
-	"AgentLoop/mini_agent_loop/openai_model/tools"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -12,7 +12,7 @@ import (
 	"os"
 	"strings"
 
-	v2 "AgentLoop/mini_agent_loop/openai_model/tools/v2"
+	v2 "AgentLoop/00-mini_agent_loop/openai_model/tools/v2"
 
 	"github.com/openai/openai-go/v3"
 )

@@ -1,10 +1,10 @@
 package main
 
 import (
+	"AgentLoop/00-mini_agent_loop/openai_model"
+	"AgentLoop/00-mini_agent_loop/openai_model/tools"
+	v1 "AgentLoop/00-mini_agent_loop/openai_model/tools/v1"
 	"AgentLoop/internal/modelclient"
-	"AgentLoop/mini_agent_loop/openai_model"
-	"AgentLoop/mini_agent_loop/openai_model/tools"
-	v1 "AgentLoop/mini_agent_loop/openai_model/tools/v1"
 	"context"
 	"encoding/json"
 	"fmt"

@@ -1,9 +1,9 @@
 package openai_model
 
 import (
-	v1 "AgentLoop/mini_agent_loop/openai_model/tools/v1"
-	v2 "AgentLoop/mini_agent_loop/openai_model/tools/v2"
-	v3 "AgentLoop/mini_agent_loop/openai_model/tools/v3"
+	v1 "AgentLoop/00-mini_agent_loop/openai_model/tools/v1"
+	v2 "AgentLoop/00-mini_agent_loop/openai_model/tools/v2"
+	v3 "AgentLoop/00-mini_agent_loop/openai_model/tools/v3"
 	"encoding/json"
 	"fmt"
 	"sort"
