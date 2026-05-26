@@ -37,7 +37,7 @@ type EditFileArgs struct {
 // runRead 读取工作区内的文件。
 // limit > 0 时，只返回前 limit 行。
 func runRead(path string, limit int) string {
-	fp, err := safePath(path)
+	fp, err := SafePath(path)
 	if err != nil {
 		return fmt.Sprintf("Error:%v", err)
 	}
@@ -104,7 +104,7 @@ func NewReadFileToolV2() v2.Tool {
 // runWrite 写入工作区内的文件。
 // 如果父目录不存在，会自动创建。
 func runWrite(path string, content string) string {
-	fp, err := safePath(path)
+	fp, err := SafePath(path)
 	if err != nil {
 		return fmt.Sprintf("Error:%v", err)
 	}
@@ -159,7 +159,7 @@ func NewWriteFileToolV2() v2.Tool {
 // runEdit 编辑工作区内的文件。
 // 只替换第一次出现的 oldText，避免误伤多个相同片段。
 func runEdit(path string, oldText string, newText string) string {
-	fp, err := safePath(path)
+	fp, err := SafePath(path)
 	if err != nil {
 		return fmt.Sprintf("Error:%v", err)
 	}
@@ -247,13 +247,13 @@ func mustWorkdir() string {
 	return abs
 }
 
-// safePath 将用户传入的相对路径限制在 WORKDIR 内。
+// SafePath 将用户传入的相对路径限制在 WORKDIR 内。
 // 作用等价于 Python:
 //
 //	path = (WORKDIR / p).resolve()
 //	if not path.is_relative_to(WORKDIR):
 //	    raise ValueError(...)
-func safePath(p string) (string, error) {
+func SafePath(p string) (string, error) {
 	// IsLocal 会拒绝空路径、绝对路径、以及 ../ 逃逸路径。
 	if !filepath.IsLocal(p) {
 		return "", fmt.Errorf("path escapes workspace: %s", p)

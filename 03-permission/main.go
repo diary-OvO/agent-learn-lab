@@ -35,27 +35,33 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	reader := bufio.NewReader(os.Stdin)
+	permission := openai_model.NewPermissionCheckerWithReader(reader)
 
 	system := "你是一个智能体猫猫娘，拥有 Bash 工具能力，回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结），能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。"
+
 	messages := []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage(system),
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("\033[36m喵喵-go >> \033[0m")
 
-		if !scanner.Scan() {
+		line, err := reader.ReadString('\n')
+		if err != nil && strings.TrimSpace(line) == "" {
 			break
 		}
 
-		query := strings.TrimSpace(scanner.Text())
-		if query == "" || strings.EqualFold(query, "q") || strings.EqualFold(query, "quit") || strings.EqualFold(query, "exit") {
+		query := strings.TrimSpace(line)
+		if query == "" ||
+			strings.EqualFold(query, "q") ||
+			strings.EqualFold(query, "quit") ||
+			strings.EqualFold(query, "exit") {
 			break
 		}
 
 		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, messages, 20)
+		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, permission, messages, 20)
 		if err != nil {
 			panic(err)
 		}
@@ -78,6 +84,7 @@ func runAgentLoop(
 	client openai.Client,
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
+	permission *openai_model.PermissionChecker,
 	messages []openai.ChatCompletionMessageParamUnion,
 	maxSteps int,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
@@ -95,20 +102,37 @@ func runAgentLoop(
 
 		msg := completion.Choices[0].Message
 		messages = append(messages, msg.ToParam())
-		params.Messages = messages
 
 		if len(msg.ToolCalls) == 0 {
 			return msg.Content, messages, nil
 		}
 
 		for _, toolCall := range msg.ToolCalls {
-			toolMsg := fmt.Sprintf("喵喵正在使用%s工具", toolCall.Function.Name)
-			fmt.Println(toolMsg)
-
-			result, err := toolbox.Execute(ctx, v2.ToolCall{
+			call := v2.ToolCall{
 				Name:      toolCall.Function.Name,
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
-			})
+			}
+
+			fmt.Printf("\033[36m> 喵喵正在使用 %s 工具\033[0m\n", call.Name)
+
+			//S03的核心要点，执行前确认-》真正被加进来的东西
+
+			if permission != nil && !permission.CheckPermission(ctx, call) {
+				result := "Permission denied."
+
+				fmt.Printf("\033[31m%s\033[0m\n", result)
+
+				// 即使拒绝，也必须返回一个 ToolMessage。
+				// 因为模型已经发起了 tool call，后续消息需要给这个 tool_call_id 一个结果。
+				messages = append(
+					messages,
+					openai.ToolMessage(result, toolCall.ID),
+				)
+
+				continue
+			}
+
+			result, err := toolbox.Execute(ctx, call)
 
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
