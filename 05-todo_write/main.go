@@ -1,6 +1,7 @@
 package main
 
 import (
+	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/mini_agent_loop/openai_model"
 	"AgentLoop/mini_agent_loop/openai_model/tools"
@@ -104,18 +105,19 @@ func runAgentLoop(
 		usedTodo := false
 
 		for _, toolCall := range msg.ToolCalls {
-			toolMsg := fmt.Sprintf("喵喵正在使用%s工具", toolCall.Function.Name)
-			fmt.Println(toolMsg)
-
-			result, err := toolbox.Execute(ctx, v2.ToolCall{
+			call := v2.ToolCall{
 				Name:      toolCall.Function.Name,
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
-			})
+			}
+
+			agentui.PrintToolCall(call)
+
+			result, err := toolbox.Execute(ctx, call)
 
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
-			fmt.Println(formatToolResult(toolCall.Function.Name, result))
+			fmt.Println(agentui.FormatToolResult(toolCall.Function.Name, result))
 
 			if toolCall.Function.Name == "todo" {
 				usedTodo = true
@@ -141,27 +143,4 @@ func runAgentLoop(
 		params.Messages = messages
 	}
 	return "", messages, fmt.Errorf("agent loop reached max steps")
-}
-
-func preview(s string, limit int) string {
-	runes := []rune(s)
-	if len(runes) <= limit {
-		return s
-	}
-	return string(runes[:limit]) + "\n...output truncated"
-}
-
-func formatToolResult(toolName string, result string) string {
-	if toolName == "todo" {
-		return formatTodoProgress(result)
-	}
-	return preview(result, 200)
-}
-
-func formatTodoProgress(result string) string {
-	result = strings.TrimSpace(result)
-	if result == "" {
-		result = "No todos."
-	}
-	return "📌 当前 TodoList 进度\n" + result
 }

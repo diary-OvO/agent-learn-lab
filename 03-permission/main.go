@@ -1,6 +1,7 @@
 package main
 
 import (
+	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/mini_agent_loop/openai_model"
 	"AgentLoop/mini_agent_loop/openai_model/tools"
@@ -113,8 +114,7 @@ func runAgentLoop(
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
 			}
 
-			fmt.Printf("\033[36m> 喵喵正在使用 %s 工具\033[0m\n", call.Name)
-			printBashCommand(call)
+			agentui.PrintToolCall(call)
 
 			//S03的核心要点，执行前确认-》真正被加进来的东西
 
@@ -147,26 +147,4 @@ func runAgentLoop(
 		params.Messages = messages
 	}
 	return "", messages, fmt.Errorf("agent loop reached max steps")
-}
-
-func printBashCommand(call v2.ToolCall) {
-	if call.Name != "bash" {
-		return
-	}
-
-	var args struct {
-		Command string `json:"command"`
-	}
-	if err := json.Unmarshal(call.Arguments, &args); err != nil || strings.TrimSpace(args.Command) == "" {
-		fmt.Printf("\033[90m  command args: %s\033[0m\n", string(call.Arguments))
-		return
-	}
-
-	command := strings.TrimSpace(args.Command)
-	if strings.Contains(command, "\n") {
-		fmt.Printf("\033[90m  command:\033[0m\n%s\n", command)
-		return
-	}
-
-	fmt.Printf("\033[90m  command: %s\033[0m\n", command)
 }

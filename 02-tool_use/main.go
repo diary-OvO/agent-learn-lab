@@ -1,6 +1,7 @@
 package main
 
 import (
+	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/mini_agent_loop/openai_model"
 	"AgentLoop/mini_agent_loop/openai_model/tools"
@@ -102,13 +103,14 @@ func runAgentLoop(
 		}
 
 		for _, toolCall := range msg.ToolCalls {
-			toolMsg := fmt.Sprintf("喵喵正在使用%s工具", toolCall.Function.Name)
-			fmt.Println(toolMsg)
-
-			result, err := toolbox.Execute(ctx, v2.ToolCall{
+			call := v2.ToolCall{
 				Name:      toolCall.Function.Name,
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
-			})
+			}
+
+			agentui.PrintToolCall(call)
+
+			result, err := toolbox.Execute(ctx, call)
 
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
