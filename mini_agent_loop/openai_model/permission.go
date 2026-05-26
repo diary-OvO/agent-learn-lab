@@ -54,17 +54,24 @@ func (p *PermissionChecker) CheckPermission(_ context.Context, call v2.ToolCall)
 		command := stringArg(args, "command")
 
 		if reason := checkDenyList(command); reason != "" {
-			fmt.Printf("\n\033[31m⛔ %s\033[0m\n", reason)
+			fmt.Printf("\033[31m  permission gate 1: denied - %s\033[0m\n", reason)
 			return false
 		}
+
+		fmt.Printf("\033[90m  permission gate 1: deny-list pass\033[0m\n")
+	} else {
+		fmt.Printf("\033[90m  permission gate 1: deny-list skipped\033[0m\n")
 	}
 
 	// Gate 2: 规则匹配
 	// 需要人工确认的命令
 	if reason := checkPermissionRules(call.Name, args); reason != "" {
+		fmt.Printf("\033[33m  permission gate 2: approval required - %s\033[0m\n", reason)
 		return p.askUser(call.Name, args, reason)
 	}
 
+	fmt.Printf("\033[90m  permission gate 2: rules pass\033[0m\n")
+	fmt.Printf("\033[32m  permission: allowed\033[0m\n")
 	return true
 }
 
@@ -104,8 +111,14 @@ func checkPermissionRules(toolName string, args map[string]any) string {
 			"rm ",
 			"> /etc/",
 			"chmod 777",
+			"del ",
+			"erase ",
+			"rmdir ",
+			"rd ",
+			"remove-item",
 		}
 
+		command = strings.ToLower(command)
 		for _, kw := range riskyKeywords {
 			if strings.Contains(command, kw) {
 				return "Potentially destructive command"
@@ -129,7 +142,13 @@ func (p *PermissionChecker) askUser(toolName string, args map[string]any, reason
 	}
 
 	choice := strings.ToLower(strings.TrimSpace(line))
-	return choice == "y" || choice == "yes"
+	allowed := choice == "y" || choice == "yes"
+	if allowed {
+		fmt.Printf("\033[32m  permission gate 3: user allowed\033[0m\n")
+	} else {
+		fmt.Printf("\033[31m  permission gate 3: user denied\033[0m\n")
+	}
+	return allowed
 }
 
 func decodeToolArgs(raw json.RawMessage) (map[string]any, error) {
