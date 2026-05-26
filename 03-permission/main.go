@@ -139,12 +139,6 @@ func runAgentLoop(
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
 
-			if hookBus != nil {
-				if hookResult := hookBus.TriggerPostToolUse(ctx, call, result); hookResult != "" {
-					result = hookResult
-				}
-			}
-
 			messages = append(
 				messages,
 				openai.ToolMessage(result, toolCall.ID),
