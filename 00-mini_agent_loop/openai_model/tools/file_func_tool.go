@@ -34,6 +34,10 @@ type EditFileArgs struct {
 	NewText string `json:"new_text"`
 }
 
+type GlobArgs struct {
+	Pattern string `json:"pattern"`
+}
+
 // runRead 读取工作区内的文件。
 // limit > 0 时，只返回前 limit 行。
 func runRead(path string, limit int) string {
@@ -226,6 +230,121 @@ func NewEditFileToolV2() v2.Tool {
 		},
 		executeEditFile,
 	)
+}
+
+// runGlob 查找工作区内匹配 glob pattern 的文件或目录。
+// pattern 必须是相对 WORKDIR 的路径，例如：
+//
+//	"*.go"
+//	"test/*.go"
+//	"internal/*/*.go"
+func runGlob(pattern string) string {
+	absPattern, err := safeGlobPattern(pattern)
+	if err != nil {
+		return fmt.Sprintf("Error:%v", err)
+	}
+
+	matches, err := filepath.Glob(absPattern)
+	if err != nil {
+		return fmt.Sprintf("Error:%v", err)
+	}
+
+	if len(matches) == 0 {
+		return "(no matches)"
+	}
+
+	results := make([]string, 0, len(matches))
+
+	for _, match := range matches {
+		// 先确认匹配路径本身在 WORKDIR 内。
+		relMatch, err := filepath.Rel(WORKDIR, match)
+		if err != nil || !filepath.IsLocal(relMatch) {
+			continue
+		}
+
+		// 如果 match 是软链接，尽量解析真实路径。
+		// 如果真实路径逃出 WORKDIR，则跳过。
+		realMatch := match
+		if real, err := filepath.EvalSymlinks(match); err == nil {
+			realMatch = real
+		}
+
+		relReal, err := filepath.Rel(WORKDIR, realMatch)
+		if err != nil || !filepath.IsLocal(relReal) {
+			continue
+		}
+
+		// 返回给模型时使用相对路径，并统一成 slash，避免 Windows 反斜杠影响模型理解。
+		results = append(results, filepath.ToSlash(relMatch))
+	}
+
+	if len(results) == 0 {
+		return "(no matches)"
+	}
+
+	output := strings.Join(results, "\n")
+
+	runes := []rune(output)
+	if len(runes) > maxOutputLen {
+		return string(runes[:maxOutputLen]) + "\n...output truncated"
+	}
+
+	return output
+}
+
+func executeGlob(ctx context.Context, arguments json.RawMessage) (string, error) {
+	var args GlobArgs
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return "", err
+	}
+
+	if strings.TrimSpace(args.Pattern) == "" {
+		return "", fmt.Errorf("pattern is required")
+	}
+
+	return runGlob(args.Pattern), nil
+}
+
+func NewGlobToolV2() v2.Tool {
+	return v2.NewFunctionTool(
+		"glob",
+		"Find files matching a glob pattern in the workspace.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"pattern": map[string]any{
+					"type":        "string",
+					"description": "Glob pattern relative to the workspace, for example: *.go, test/*.go, internal/*/*.go.",
+				},
+			},
+			"required":             []string{"pattern"},
+			"additionalProperties": false,
+		},
+		executeGlob,
+	)
+}
+
+// safeGlobPattern 校验 glob pattern 是否仍然限制在 WORKDIR 内。
+// 不能直接用 SafePath，因为 SafePath 面向真实文件路径，
+// 而 glob pattern 里可能包含 *, ?, [] 等通配符。
+func safeGlobPattern(pattern string) (string, error) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return "", fmt.Errorf("pattern is required")
+	}
+
+	// 统一处理模型经常生成的 Unix 风格路径。
+	pattern = filepath.FromSlash(pattern)
+
+	// 清理路径，例如 ./a/*.go -> a/*.go。
+	pattern = filepath.Clean(pattern)
+
+	// 禁止绝对路径、空路径、../ 逃逸路径。
+	if !filepath.IsLocal(pattern) {
+		return "", fmt.Errorf("pattern escapes workspace: %s", pattern)
+	}
+
+	return filepath.Join(WORKDIR, pattern), nil
 }
 
 func mustWorkdir() string {
