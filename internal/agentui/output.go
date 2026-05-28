@@ -39,7 +39,7 @@ func PrintBashCommand(call v2.ToolCall) {
 
 // FormatToolResult 格式化工具执行结果，供 CLI 输出展示。
 func FormatToolResult(toolName string, result string) string {
-	if toolName == "todo" {
+	if toolName == "todo" || toolName == "todo_write" {
 		return FormatTodoProgress(result)
 	}
 	return Preview(result, 200)

@@ -124,7 +124,7 @@ func (m *TodoManager) renderLocked() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func executeTodoWrite(manager *TodoManager) func(context.Context, json.RawMessage) (string, error) {
+func executeTodo(manager *TodoManager) func(context.Context, json.RawMessage) (string, error) {
 	return func(_ context.Context, arguments json.RawMessage) (string, error) {
 		var args TodoArgs
 		if err := json.Unmarshal(arguments, &args); err != nil {
@@ -180,7 +180,7 @@ func NewTodoToolV2WithManager(manager *TodoManager) v2.Tool {
 			"required":             []string{"items"},
 			"additionalProperties": false,
 		},
-		executeTodoWrite(manager),
+		executeTodo(manager),
 	)
 }
 

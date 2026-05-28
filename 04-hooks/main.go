@@ -4,7 +4,6 @@ import (
 	"AgentLoop/00-mini_agent_loop/openai_model"
 	"AgentLoop/00-mini_agent_loop/openai_model/hooks"
 	"AgentLoop/00-mini_agent_loop/openai_model/tools"
-	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
 	"bufio"
 	"context"
@@ -140,8 +139,6 @@ func runAgentLoop(
 				Name:      toolCall.Function.Name,
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
 			}
-
-			agentui.PrintToolCall(call)
 
 			//工具执行前注入
 			blocked := hookBus.TriggerPreToolUse(ctx, call)
