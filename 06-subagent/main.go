@@ -24,11 +24,37 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	ctx = agentui.WithAgentScope(ctx, agentui.AgentScope{Name: "main", ID: "parent", Depth: 0})
-	subagent, err := openai_model.NewSubAgent(client, nil)
+	ctx = agentui.WithAgentScope(ctx, agentui.AgentScope{
+		Name:  "main",
+		ID:    "parent",
+		Depth: 0,
+	})
+
+	reader := bufio.NewReader(os.Stdin)
+	permission := openai_model.NewPermissionCheckerWithReader(reader)
+
+	workdir, err := os.Getwd()
 	if err != nil {
 		panic(err)
 	}
+
+	hookBus := hooks.NewHookBus()
+	openai_model.RegisterS06DefaultHooks(hookBus, permission, workdir)
+
+	subToolbox := v2.NewToolBox(
+		tools.NewWeatherToolV2(),
+		tools.NewBashToolV2(),
+		tools.NewReadFileToolV2(),
+		tools.NewWriteFileToolV2(),
+		tools.NewEditFileToolV2(),
+		tools.NewGlobToolV2(),
+	)
+
+	subagent, err := openai_model.NewSubAgent(client, subToolbox, hookBus)
+	if err != nil {
+		panic(err)
+	}
+
 	toolbox := v2.NewToolBox(
 		tools.NewWeatherToolV2(),
 		tools.NewBashToolV2(),
@@ -44,16 +70,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	reader := bufio.NewReader(os.Stdin)
-	permission := openai_model.NewPermissionCheckerWithReader(reader)
-
-	workdir, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	//初始化hookBus
-	hookBus := hooks.NewHookBus()
-	openai_model.RegisterS05DefaultHooks(hookBus, permission, workdir)
 
 	system := fmt.Sprintf(
 		"你是一个智能体猫猫娘，位于当前工作区 %s。"+

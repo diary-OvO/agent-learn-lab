@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +59,7 @@ func (a *SubAgent) Run(ctx context.Context, description string) (string, error) 
 	system := "你是一个子智能体。完成被分配的任务，然后只返回简洁总结。不要继续委派任务。"
 	id := fmt.Sprintf("sub-%d", a.nextID.Add(1))
 	parentScope := agentui.ScopeFromContext(ctx)
+
 	subCtx := agentui.WithAgentScope(ctx, agentui.AgentScope{
 		Name:  "sub",
 		ID:    id,
@@ -65,7 +67,13 @@ func (a *SubAgent) Run(ctx context.Context, description string) (string, error) 
 	})
 
 	start := time.Now()
-	agentui.PrintSubagentStart(ctx, id, description)
+
+	if a.hookBus != nil {
+		a.hookBus.TriggerSubagentStart(ctx, hooks.SubagentStartContext{
+			ID:          id,
+			Description: description,
+		})
+	}
 
 	messages := []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage(system),
@@ -74,11 +82,24 @@ func (a *SubAgent) Run(ctx context.Context, description string) (string, error) 
 
 	summary, err := a.loop(subCtx, messages, 30)
 	if err != nil {
-		agentui.PrintSubagentError(ctx, id, err, time.Since(start))
+		if a.hookBus != nil {
+			a.hookBus.TriggerSubagentError(ctx, hooks.SubagentErrorContext{
+				ID:      id,
+				Err:     err,
+				Elapsed: time.Since(start),
+			})
+		}
 		return "", err
 	}
 
-	agentui.PrintSubagentDone(ctx, id, summary, time.Since(start))
+	if a.hookBus != nil {
+		a.hookBus.TriggerSubagentDone(ctx, hooks.SubagentDoneContext{
+			ID:      id,
+			Summary: summary,
+			Elapsed: time.Since(start),
+		})
+	}
+
 	return summary, nil
 }
 func (a *SubAgent) loop(
@@ -91,8 +112,12 @@ func (a *SubAgent) loop(
 		Messages: messages,
 		Tools:    a.toolboxSchema,
 	}
+
 	client := a.client
 	toolbox := a.toolbox
+
+	toolCallCount := 0
+	lastAssistantText := ""
 
 	for step := 0; step < maxSteps; step++ {
 		completion, err := client.Chat.Completions.New(ctx, params)
@@ -101,10 +126,27 @@ func (a *SubAgent) loop(
 		}
 
 		msg := completion.Choices[0].Message
+		if strings.TrimSpace(msg.Content) != "" {
+			lastAssistantText = msg.Content
+		}
+
 		messages = append(messages, msg.ToParam())
 		params.Messages = messages
 
 		if len(msg.ToolCalls) == 0 {
+			if a.hookBus != nil {
+				force := a.hookBus.TriggerStop(ctx, hooks.StopContext{
+					MessageCount:  len(messages),
+					ToolCallCount: toolCallCount,
+				})
+
+				if strings.TrimSpace(force) != "" {
+					messages = append(messages, openai.UserMessage(force))
+					params.Messages = messages
+					continue
+				}
+			}
+
 			return msg.Content, nil
 		}
 
@@ -114,7 +156,21 @@ func (a *SubAgent) loop(
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
 			}
 
-			agentui.PrintToolCall(ctx, call)
+			toolCallCount++
+
+			if a.hookBus != nil {
+				blocked := a.hookBus.TriggerPreToolUse(ctx, call)
+				if strings.TrimSpace(blocked) != "" {
+					result := a.hookBus.TriggerPostToolUse(ctx, call, blocked)
+
+					messages = append(
+						messages,
+						openai.ToolMessage(result, toolCall.ID),
+					)
+
+					continue
+				}
+			}
 
 			result, err := toolbox.Execute(ctx, call)
 
@@ -122,12 +178,22 @@ func (a *SubAgent) loop(
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
 
+			if a.hookBus != nil {
+				result = a.hookBus.TriggerPostToolUse(ctx, call, result)
+			}
+
 			messages = append(
 				messages,
 				openai.ToolMessage(result, toolCall.ID),
 			)
 		}
+
 		params.Messages = messages
 	}
-	return "Subagent stopped after 30 turns without final answer.", nil
+
+	if strings.TrimSpace(lastAssistantText) != "" {
+		return lastAssistantText, nil
+	}
+
+	return "", fmt.Errorf("agent loop reached max steps")
 }

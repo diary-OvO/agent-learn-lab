@@ -327,3 +327,32 @@ func indent(s string, prefix string) string {
 
 	return strings.Join(lines, "\n")
 }
+func FormatSubagentStart(ctx context.Context, id string, description string) string {
+	scope := ScopeFromContext(ctx)
+
+	return fmt.Sprintf(
+		"\n\033[35m[Subagent spawned] id=%s parent=%s depth=%d\033[0m\n  task: %s",
+		id,
+		formatScope(scope),
+		scope.Depth,
+		Preview(description, 260),
+	)
+}
+
+func FormatSubagentDone(ctx context.Context, id string, summary string, elapsed time.Duration) string {
+	return fmt.Sprintf(
+		"\033[35m[Subagent done] id=%s elapsed=%s\033[0m\n  summary: %s",
+		id,
+		elapsed.Round(time.Millisecond),
+		Preview(strings.TrimSpace(summary), 360),
+	)
+}
+
+func FormatSubagentError(ctx context.Context, id string, err error, elapsed time.Duration) string {
+	return fmt.Sprintf(
+		"\033[31m[Subagent error] id=%s elapsed=%s error=%v\033[0m",
+		id,
+		elapsed.Round(time.Millisecond),
+		err,
+	)
+}
