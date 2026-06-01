@@ -1,9 +1,9 @@
 package openai_model
 
 import (
+	"AgentLoop/00-mini_agent_loop/openai_model/agentui"
 	"AgentLoop/00-mini_agent_loop/openai_model/hooks"
 	v2 "AgentLoop/00-mini_agent_loop/openai_model/tools/v2"
-	"AgentLoop/internal/agentui"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,7 +24,7 @@ func RegisterS04DefaultHooks(
 	hookBus.RegisterUserPromptSubmit(ContextInjectHook(workdir))
 	hookBus.RegisterPreToolUse(ToolCallOutputHook())
 	hookBus.RegisterPreToolUse(PermissionHook(permission))
-	hookBus.RegisterPreToolUse(LogHook())
+	//hookBus.RegisterPreToolUse(LogHook())
 	hookBus.RegisterPostToolUse(LargeOutputHook(100_000))
 	hookBus.RegisterStop(SummaryHook())
 }
@@ -32,8 +32,8 @@ func RegisterS04DefaultHooks(
 // ToolCallOutputHook 把工具调用过程输出包装成 PreToolUse hook。
 // 它只负责展示工具名和必要参数，不阻断工具执行。
 func ToolCallOutputHook() hooks.PreToolUseHook {
-	return func(_ context.Context, call v2.ToolCall) string {
-		agentui.PrintToolCall(call)
+	return func(ctx context.Context, call v2.ToolCall) string {
+		agentui.PrintToolCall(ctx, call)
 		return ""
 	}
 }
@@ -41,8 +41,8 @@ func ToolCallOutputHook() hooks.PreToolUseHook {
 // ToolResultOutputHook 把工具执行结果输出包装成 PostToolUse hook。
 // 它只负责展示格式化后的结果预览，不修改工具结果。
 func ToolResultOutputHook() hooks.PostToolUseHook {
-	return func(_ context.Context, call v2.ToolCall, output string) string {
-		formatted := strings.TrimSpace(agentui.FormatToolResult(call.Name, output))
+	return func(ctx context.Context, call v2.ToolCall, output string) string {
+		formatted := strings.TrimSpace(agentui.FormatToolResult(ctx, call, output))
 		if formatted != "" {
 			fmt.Println(formatted)
 		}

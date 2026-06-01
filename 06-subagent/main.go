@@ -3,6 +3,7 @@ package main
 import (
 	"AgentLoop/00-mini_agent_loop/openai_model"
 	"AgentLoop/00-mini_agent_loop/openai_model/agentui"
+	"AgentLoop/00-mini_agent_loop/openai_model/hooks"
 	"AgentLoop/00-mini_agent_loop/openai_model/tools"
 	"AgentLoop/internal/modelclient"
 	"bufio"
@@ -23,13 +24,20 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
+	ctx = agentui.WithAgentScope(ctx, agentui.AgentScope{Name: "main", ID: "parent", Depth: 0})
+	subagent, err := openai_model.NewSubAgent(client, nil)
+	if err != nil {
+		panic(err)
+	}
 	toolbox := v2.NewToolBox(
 		tools.NewWeatherToolV2(),
 		tools.NewBashToolV2(),
 		tools.NewReadFileToolV2(),
 		tools.NewWriteFileToolV2(),
 		tools.NewEditFileToolV2(),
+		tools.NewGlobToolV2(),
+		tools.NewTodoWriteToolV2(),
+		tools.NewTaskToolV2(subagent),
 	)
 
 	chatTools, err := openai_model.ToChatCompletionToolsV2(toolbox.Schemas())
@@ -39,7 +47,24 @@ func main() {
 	reader := bufio.NewReader(os.Stdin)
 	permission := openai_model.NewPermissionCheckerWithReader(reader)
 
-	system := "你是一个智能体猫猫娘，拥有 Bash 工具能力，回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结），能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。"
+	workdir, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	//初始化hookBus
+	hookBus := hooks.NewHookBus()
+	openai_model.RegisterS05DefaultHooks(hookBus, permission, workdir)
+
+	system := fmt.Sprintf(
+		"你是一个智能体猫猫娘，位于当前工作区 %s。"+
+			"在开始任何多步骤任务前，必须先使用 todo_write 规划步骤。"+
+			"执行过程中持续更新 todo_write 的状态：开始做某一步前标记为 in_progress，完成后标记为 completed。"+
+			"你可以使用 Bash 和文件工具完成任务。"+
+			"所有破坏性操作都需要用户批准。"+
+			"回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结）。"+
+			"能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。",
+		workdir,
+	)
 
 	messages := []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage(system),
@@ -60,9 +85,11 @@ func main() {
 			strings.EqualFold(query, "exit") {
 			break
 		}
+		//输入前注入
+		_ = hookBus.TriggerUserPromptSubmit(ctx, query)
 
 		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, permission, messages, 20)
+		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, messages, 20)
 		if err != nil {
 			panic(err)
 		}
@@ -85,7 +112,7 @@ func runAgentLoop(
 	client openai.Client,
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
-	permission *openai_model.PermissionChecker,
+	hookBus *hooks.HookBus,
 	messages []openai.ChatCompletionMessageParamUnion,
 	maxSteps int,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
@@ -94,8 +121,12 @@ func runAgentLoop(
 		Messages: messages,
 		Tools:    toolboxSchema,
 	}
+	//新增工具调用次数统计
+	toolCallCount := 0
+	roundsSinceTodo := 0
 
 	for step := 0; step < maxSteps; step++ {
+
 		completion, err := client.Chat.Completions.New(ctx, params)
 		if err != nil {
 			return "", messages, err
@@ -105,26 +136,36 @@ func runAgentLoop(
 		messages = append(messages, msg.ToParam())
 
 		if len(msg.ToolCalls) == 0 {
+			//结束前注入
+			force := hookBus.TriggerStop(ctx, hooks.StopContext{
+				MessageCount:  len(messages),
+				ToolCallCount: toolCallCount,
+			})
+
+			// 如果 Stop hook 返回非空内容，可以把它作为 user message 继续送回模型。
+			// 默认 SummaryHook 返回空字符串，所以一般会直接退出。
+			if force != "" {
+				messages = append(messages, openai.UserMessage(force))
+				params.Messages = messages
+				continue
+			}
+
 			return msg.Content, messages, nil
 		}
-
+		roundsSinceTodo++
 		for _, toolCall := range msg.ToolCalls {
 			call := v2.ToolCall{
 				Name:      toolCall.Function.Name,
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
 			}
-
-			agentui.PrintToolCall(ctx, call)
-
-			//S03的核心要点，执行前确认-》真正被加进来的东西
-
-			if permission != nil && !permission.CheckPermission(ctx, call) {
-				result := "Permission denied."
+			toolCallCount++
+			//工具执行前注入
+			blocked := hookBus.TriggerPreToolUse(ctx, call)
+			if blocked != "" {
+				result := blocked
 
 				fmt.Printf("\033[31m%s\033[0m\n", result)
 
-				// 即使拒绝，也必须返回一个 ToolMessage。
-				// 因为模型已经发起了 tool call，后续消息需要给这个 tool_call_id 一个结果。
 				messages = append(
 					messages,
 					openai.ToolMessage(result, toolCall.ID),
@@ -138,11 +179,24 @@ func runAgentLoop(
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
+			//工具结束前注入
+			_ = hookBus.TriggerPostToolUse(ctx, call, result)
 
+			if toolCall.Function.Name == "todo_write" {
+				roundsSinceTodo = 0
+			}
 			messages = append(
 				messages,
 				openai.ToolMessage(result, toolCall.ID),
 			)
+		}
+		//加入，Agent忽视了ToDo并且多次都没有调用的话，新增一个执行
+		if roundsSinceTodo >= 3 {
+			messages = append(
+				messages,
+				openai.UserMessage("<reminder>Update your todos.</reminder>"),
+			)
+			roundsSinceTodo = 0
 		}
 		params.Messages = messages
 	}

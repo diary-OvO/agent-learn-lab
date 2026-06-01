@@ -11,11 +11,10 @@
 package modelclient
 
 import (
+	"AgentLoop/internal/config"
 	"fmt"
 	"os"
 	"strings"
-
-	"AgentLoop/internal/config"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"

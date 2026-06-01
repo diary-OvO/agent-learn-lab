@@ -2,8 +2,8 @@ package main
 
 import (
 	"AgentLoop/00-mini_agent_loop/openai_model"
+	"AgentLoop/00-mini_agent_loop/openai_model/agentui"
 	"AgentLoop/00-mini_agent_loop/openai_model/tools"
-	"AgentLoop/internal/agentui"
 	"AgentLoop/internal/modelclient"
 	"bufio"
 	"context"
@@ -110,14 +110,14 @@ func runAgentLoop(
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
 			}
 
-			agentui.PrintToolCall(call)
+			agentui.PrintToolCall(ctx, call)
 
 			result, err := toolbox.Execute(ctx, call)
 
 			if err != nil {
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
-			fmt.Println(agentui.FormatToolResult(toolCall.Function.Name, result))
+			fmt.Println(agentui.FormatToolResult(ctx, call, result))
 
 			if toolCall.Function.Name == "todo" {
 				usedTodo = true
