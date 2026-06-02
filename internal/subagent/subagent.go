@@ -136,8 +136,7 @@ func (a *SubAgent) loop(
 					continue
 				}
 			}
-
-			return msg.Content, nil
+			return fallbackSubagentText(msg.Content), nil
 		}
 
 		for _, toolCall := range msg.ToolCalls {
@@ -181,9 +180,13 @@ func (a *SubAgent) loop(
 		params.Messages = messages
 	}
 
-	if strings.TrimSpace(lastAssistantText) != "" {
-		return lastAssistantText, nil
+	return fallbackSubagentText(lastAssistantText), nil
+}
+
+func fallbackSubagentText(text string) string {
+	if strings.TrimSpace(text) != "" {
+		return strings.TrimSpace(text)
 	}
 
-	return "", fmt.Errorf("agent loop reached max steps")
+	return "Subagent stopped after 30 turns without final answer."
 }

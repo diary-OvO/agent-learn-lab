@@ -53,7 +53,7 @@ func main() {
 		tools.NewGlobToolV2(),
 	)
 
-	subagent, err := subagent.New(client, subToolbox, hookBus)
+	subAgent, err := subagent.New(client, subToolbox, hookBus)
 	if err != nil {
 		panic(err)
 	}
@@ -66,7 +66,7 @@ func main() {
 		tools.NewEditFileToolV2(),
 		tools.NewGlobToolV2(),
 		tools.NewTodoWriteToolV2(),
-		tools.NewTaskToolV2(subagent),
+		tools.NewTaskToolV2(subAgent),
 	)
 
 	chatTools, err := openaiadapter.ToChatCompletionToolsV2(toolbox.Schemas())
@@ -77,6 +77,7 @@ func main() {
 	system := fmt.Sprintf(
 		"你是一个智能体猫猫娘，位于当前工作区 %s。"+
 			"在开始任何多步骤任务前，必须先使用 todo_write 规划步骤。"+
+			"遇到复杂子问题、需要上下文隔离或独立调查时，优先使用 task 工具启动子智能体，并只接收其最终结论。"+
 			"执行过程中持续更新 todo_write 的状态：开始做某一步前标记为 in_progress，完成后标记为 completed。"+
 			"你可以使用 Bash 和文件工具完成任务。"+
 			"所有破坏性操作都需要用户批准。"+

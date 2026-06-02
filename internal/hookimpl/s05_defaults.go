@@ -13,7 +13,8 @@ func RegisterS05DefaultHooks(
 	hookBus.RegisterUserPromptSubmit(ContextInjectHook(workdir))
 	hookBus.RegisterPreToolUse(ToolCallOutputHook())
 	hookBus.RegisterPreToolUse(PermissionHook(checker))
-	hookBus.RegisterPreToolUse(LogHook())
+	//基于与ToolCallOutputHook功能冲突，暂时去除LogHook日志输出
+	//hookBus.RegisterPreToolUse(LogHook())
 	hookBus.RegisterPostToolUse(LargeOutputHook(100_000))
 	hookBus.RegisterPostToolUse(ToolResultOutputHook())
 	hookBus.RegisterStop(SummaryHook())
