@@ -73,7 +73,12 @@ func FormatToolCall(ctx context.Context, call v2.ToolCall) string {
 			prefix,
 			quote(Preview(argString(args, "description"), 220)),
 		)
-
+	case "load_skill":
+		return fmt.Sprintf(
+			"%s name=%s",
+			prefix,
+			quote(argString(args, "name")),
+		)
 	default:
 		return fmt.Sprintf(
 			"%s args=%s",
@@ -110,7 +115,8 @@ func FormatToolResult(ctx context.Context, call v2.ToolCall, result string) stri
 
 	case "todo_write":
 		return fmt.Sprintf("%s %s", prefix, Preview(result, 240))
-
+	case "load_skill":
+		return fmt.Sprintf("%s\n%s", prefix, indent(Preview(result, 800), "  "))
 	default:
 		return fmt.Sprintf("%s %s", prefix, Preview(result, 300))
 	}
