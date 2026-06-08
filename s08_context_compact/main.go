@@ -115,7 +115,7 @@ func main() {
 		}
 
 		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, messages, 20)
+		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, workdir, messages, 20)
 		if err != nil {
 			panic(err)
 		}
@@ -139,6 +139,7 @@ func runAgentLoop(
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
 	hookBus *hooks.HookBus,
+	workdir string,
 	messages []openai.ChatCompletionMessageParamUnion,
 	maxSteps int,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
@@ -150,13 +151,44 @@ func runAgentLoop(
 	//新增工具调用次数统计
 	toolCallCount := 0
 	roundsSinceTodo := 0
-
+	reactiveRetries := 0
 	for step := 0; step < maxSteps; step++ {
-
-		completion, err := client.Chat.Completions.New(ctx, params)
+		//S08 执行运行前的压缩检测
+		var err error
+		messages, err = compact.ToolResultBudget(messages, workdir, 200_000)
 		if err != nil {
 			return "", messages, err
 		}
+		messages = compact.SnipCompact(messages, 50)
+		messages = compact.MicroCompact(messages)
+		if compact.EstimateSize(messages) > compact.CONTEXT_LIMIT {
+			fmt.Println("[auto compact]")
+
+			messages, err = compact.CompactHistory(ctx, client, modelID, workdir, messages)
+			if err != nil {
+				return "", messages, err
+			}
+		}
+		params.Messages = messages
+		completion, err := client.Chat.Completions.New(ctx, params)
+		if err != nil {
+			//  报错捕获，针对上下文过长报错进行强制压缩
+			if shouldReactiveCompact(err) && reactiveRetries < maxReactiveRetries {
+				fmt.Println("[reactive compact]")
+
+				messages, err = compact.ReactiveCompact(ctx, client, modelID, workdir, messages)
+				if err != nil {
+					return "", messages, err
+				}
+
+				reactiveRetries++
+				params.Messages = messages
+				continue
+			}
+			return "", messages, err
+		}
+
+		reactiveRetries = 0
 
 		msg := completion.Choices[0].Message
 		messages = append(messages, msg.ToParam())
@@ -179,12 +211,33 @@ func runAgentLoop(
 			return msg.Content, messages, nil
 		}
 		roundsSinceTodo++
+		compactCalled := false
+
 		for _, toolCall := range msg.ToolCalls {
+			toolCallCount++
+
+			if toolCall.Function.Name == compactToolName {
+				messages, err = compact.CompactHistory(ctx, client, modelID, workdir, messages)
+				if err != nil {
+					result := fmt.Sprintf(`{"error": %q}`, err.Error())
+					messages = append(messages, openai.ToolMessage(result, toolCall.ID))
+					continue
+				}
+
+				messages = append(
+					messages,
+					openai.UserMessage("[Compacted. Conversation history has been summarized.]"),
+				)
+
+				roundsSinceTodo = 0
+				compactCalled = true
+				break
+			}
+
 			call := v2.ToolCall{
 				Name:      toolCall.Function.Name,
 				Arguments: json.RawMessage(toolCall.Function.Arguments),
 			}
-			toolCallCount++
 			//工具执行前注入
 			blocked := hookBus.TriggerPreToolUse(ctx, call)
 			if blocked != "" {
@@ -219,6 +272,10 @@ func runAgentLoop(
 				openai.ToolMessage(result, toolCall.ID),
 			)
 		}
+		if compactCalled {
+			params.Messages = messages
+			continue
+		}
 		//加入，Agent忽视了ToDo并且多次都没有调用的话，新增一个执行
 		if roundsSinceTodo >= 3 {
 			messages = append(
@@ -230,4 +287,14 @@ func runAgentLoop(
 		params.Messages = messages
 	}
 	return "", messages, fmt.Errorf("agent loop reached max steps")
+}
+func shouldReactiveCompact(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	s := strings.ToLower(err.Error())
+
+	return strings.Contains(s, "prompt_too_long") ||
+		strings.Contains(s, "too many tokens")
 }
