@@ -1,12 +1,11 @@
 package main
 
 import (
-	"AgentLoop/internal/hookimpl"
 	"AgentLoop/internal/hooks"
+	"AgentLoop/internal/loopinit"
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/internal/openaiadapter"
 	"AgentLoop/internal/permission"
-	"AgentLoop/internal/tools"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -26,13 +25,7 @@ func main() {
 		panic(err)
 	}
 
-	toolbox := v2.NewToolBox(
-		tools.NewWeatherToolV2(),
-		tools.NewBashToolV2(),
-		tools.NewReadFileToolV2(),
-		tools.NewWriteFileToolV2(),
-		tools.NewEditFileToolV2(),
-	)
+	toolbox := loopinit.InitS04Toolbox()
 
 	chatTools, err := openaiadapter.ToChatCompletionToolsV2(toolbox.Schemas())
 	if err != nil {
@@ -47,7 +40,7 @@ func main() {
 	}
 	//初始化hookBus
 	hookBus := hooks.NewHookBus()
-	hookimpl.RegisterS04DefaultHooks(hookBus, checker, workdir)
+	loopinit.InitS04Hooks(hookBus, checker, workdir)
 
 	system := "你是一个智能体猫猫娘，拥有 Bash 工具能力，回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结），能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。"
 

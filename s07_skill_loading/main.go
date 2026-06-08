@@ -2,14 +2,13 @@ package main
 
 import (
 	"AgentLoop/internal/agentconsole"
-	"AgentLoop/internal/hookimpl"
 	"AgentLoop/internal/hooks"
+	"AgentLoop/internal/loopinit"
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/internal/openaiadapter"
 	"AgentLoop/internal/permission"
 	"AgentLoop/internal/skills"
 	"AgentLoop/internal/subagent"
-	"AgentLoop/internal/tools"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -44,7 +43,7 @@ func main() {
 	}
 
 	hookBus := hooks.NewHookBus()
-	hookimpl.RegisterS06DefaultHooks(hookBus, checker, workdir)
+	loopinit.InitS07Hooks(hookBus, checker, workdir)
 
 	skillsDir := filepath.Join(workdir, "skills")
 	skillRegistry, err := skills.Scan(skillsDir)
@@ -52,31 +51,14 @@ func main() {
 		panic(err)
 	}
 
-	subToolbox := v2.NewToolBox(
-		tools.NewWeatherToolV2(),
-		tools.NewBashToolV2(),
-		tools.NewReadFileToolV2(),
-		tools.NewWriteFileToolV2(),
-		tools.NewEditFileToolV2(),
-		tools.NewGlobToolV2(),
-	)
+	subToolbox := loopinit.InitS07SubToolbox()
 
 	subAgent, err := subagent.New(client, subToolbox, hookBus)
 	if err != nil {
 		panic(err)
 	}
 
-	toolbox := v2.NewToolBox(
-		tools.NewWeatherToolV2(),
-		tools.NewBashToolV2(),
-		tools.NewReadFileToolV2(),
-		tools.NewWriteFileToolV2(),
-		tools.NewEditFileToolV2(),
-		tools.NewGlobToolV2(),
-		tools.NewTodoWriteToolV2(),
-		tools.NewTaskToolV2(subAgent),
-		tools.NewLoadSkillToolV2(skillRegistry),
-	)
+	toolbox := loopinit.InitS07Toolbox(subAgent, skillRegistry)
 
 	chatTools, err := openaiadapter.ToChatCompletionToolsV2(toolbox.Schemas())
 	if err != nil {

@@ -1,16 +1,21 @@
 package main
 
 import (
+	"AgentLoop/internal/agentconsole"
+	"AgentLoop/internal/compact"
 	"AgentLoop/internal/hooks"
 	"AgentLoop/internal/loopinit"
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/internal/openaiadapter"
 	"AgentLoop/internal/permission"
+	"AgentLoop/internal/skills"
+	"AgentLoop/internal/subagent"
 	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	v2 "AgentLoop/internal/toolkit/v2"
@@ -24,13 +29,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	ctx = agentconsole.WithAgentScope(ctx, agentconsole.AgentScope{
+		Name:  "main",
+		ID:    "parent",
+		Depth: 0,
+	})
 
-	toolbox := loopinit.InitS05Toolbox()
-
-	chatTools, err := openaiadapter.ToChatCompletionToolsV2(toolbox.Schemas())
-	if err != nil {
-		panic(err)
-	}
 	reader := bufio.NewReader(os.Stdin)
 	checker := permission.NewPermissionCheckerWithReader(reader)
 
@@ -38,19 +42,45 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	//初始化hookBus
+
 	hookBus := hooks.NewHookBus()
-	loopinit.InitS05Hooks(hookBus, checker, workdir)
+	loopinit.InitS08Hooks(hookBus, checker, workdir)
+
+	skillsDir := filepath.Join(workdir, "skills")
+	skillRegistry, err := skills.Scan(skillsDir)
+	if err != nil {
+		panic(err)
+	}
+
+	subToolbox := loopinit.InitS08SubToolbox()
+
+	subAgent, err := subagent.New(client, subToolbox, hookBus)
+	if err != nil {
+		panic(err)
+	}
+
+	toolbox := loopinit.InitS08Toolbox(subAgent, skillRegistry)
+
+	shcemas := append(toolbox.Schemas(), compact.CompactToolSchema())
+	chatTools, err := openaiadapter.ToChatCompletionToolsV2(shcemas)
+	if err != nil {
+		panic(err)
+	}
 
 	system := fmt.Sprintf(
 		"你是一个智能体猫猫娘，位于当前工作区 %s。"+
+			"\n\n可用 Skills：\n%s\n\n"+
+			"当任务需要某个 Skill 的完整说明时，使用 load_skill 工具按 name 加载完整 SKILL.md。"+
+			"不要把完整 Skill 内容提前假设进回答；需要时再加载。"+
 			"在开始任何多步骤任务前，必须先使用 todo_write 规划步骤。"+
+			"遇到复杂子问题、需要上下文隔离或独立调查时，优先使用 task 工具启动子智能体，并只接收其最终结论。"+
 			"执行过程中持续更新 todo_write 的状态：开始做某一步前标记为 in_progress，完成后标记为 completed。"+
 			"你可以使用 Bash 和文件工具完成任务。"+
 			"所有破坏性操作都需要用户批准。"+
 			"回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结）。"+
 			"能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。",
 		workdir,
+		skillRegistry.List(),
 	)
 
 	messages := []openai.ChatCompletionMessageParamUnion{
@@ -73,7 +103,10 @@ func main() {
 			break
 		}
 		//输入前注入
-		_ = hookBus.TriggerUserPromptSubmit(ctx, query)
+		hookedQuery := hookBus.TriggerUserPromptSubmit(ctx, query)
+		if strings.TrimSpace(hookedQuery) != "" {
+			query = hookedQuery
+		}
 
 		messages = appendUserMessage(messages, query)
 		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, messages, 20)
@@ -167,7 +200,10 @@ func runAgentLoop(
 				result = fmt.Sprintf(`{"error": %q}`, err.Error())
 			}
 			//工具结束前注入
-			_ = hookBus.TriggerPostToolUse(ctx, call, result)
+			postResult := hookBus.TriggerPostToolUse(ctx, call, result)
+			if strings.TrimSpace(postResult) != "" {
+				result = postResult
+			}
 
 			if toolCall.Function.Name == "todo_write" {
 				roundsSinceTodo = 0
