@@ -15,6 +15,8 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
+const modelID = "deepseek-v4-pro"
+
 type SubAgent struct {
 	client openai.Client
 
@@ -98,7 +100,7 @@ func (a *SubAgent) loop(
 	maxSteps int,
 ) (string, error) {
 	params := openai.ChatCompletionNewParams{
-		Model:    "deepseek-v4-pro",
+		Model:    modelID,
 		Messages: messages,
 		Tools:    a.toolboxSchema,
 	}

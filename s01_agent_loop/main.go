@@ -17,6 +17,8 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
+const modelID = "deepseek-v4-pro"
+
 func main() {
 	ctx := context.Background()
 	client, _, err := modelclient.NewFromEnv(modelclient.Aliyun())
@@ -79,7 +81,7 @@ func runAgentLoop(
 	maxSteps int,
 ) (string, []openai.ChatCompletionMessageParamUnion, error) {
 	params := openai.ChatCompletionNewParams{
-		Model:    "deepseek-v4-pro",
+		Model:    modelID,
 		Messages: messages,
 		Tools:    toolboxSchema,
 	}
