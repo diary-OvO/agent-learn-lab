@@ -155,7 +155,7 @@ func runAgentLoop(
 	for step := 0; step < maxSteps; step++ {
 		//S08 执行运行前的压缩检测
 		var err error
-		messages, err = compact.ToolResultBudget(messages, workdir, 200_000)
+		messages, err = compact.ToolResultBudget(messages, workdir, 200000)
 		if err != nil {
 			return "", messages, err
 		}
@@ -296,5 +296,8 @@ func shouldReactiveCompact(err error) bool {
 	s := strings.ToLower(err.Error())
 
 	return strings.Contains(s, "prompt_too_long") ||
-		strings.Contains(s, "too many tokens")
+		strings.Contains(s, "too many tokens") ||
+		strings.Contains(s, "context length exceeded") ||
+		strings.Contains(s, "maximum context length") ||
+		strings.Contains(s, "tokens exceed")
 }
