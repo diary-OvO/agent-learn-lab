@@ -29,20 +29,26 @@ func MessageRole(msg openai.ChatCompletionMessageParamUnion) string {
 	}
 }
 
-// MessageText 对标 Python msg.get("content")。
+// MessageTextContent 对标 Python msg.get("content")。
 //
-// 从 OpenAI ChatCompletionMessageParamUnion 中提取可用于 compact / memory / prompt 拼接的文本内容。
-func MessageText(msg openai.ChatCompletionMessageParamUnion) string {
-	text := contentText(msg.GetContent().AsAny())
-	if text != "" {
+// 从任意 ChatCompletion message 中提取可用于 compact / memory / prompt 拼接的文本内容。
+func MessageTextContent(msg openai.ChatCompletionMessageParamUnion) string {
+	switch {
+	case msg.OfUser != nil && !param.IsOmitted(msg.OfUser):
+		text, _ := UserTextContent(msg)
 		return text
-	}
 
-	if msg.OfAssistant != nil && msg.OfAssistant.Refusal.Valid() {
-		return msg.OfAssistant.Refusal.Value
-	}
+	case msg.OfAssistant != nil && !param.IsOmitted(msg.OfAssistant):
+		text, _ := AssistantTextContent(msg)
+		return text
 
-	return ""
+	case msg.OfTool != nil && !param.IsOmitted(msg.OfTool):
+		text, _ := ToolTextContent(msg)
+		return text
+
+	default:
+		return messageContentText(msg.GetContent().AsAny())
+	}
 }
 
 // MessageRoleAndText 对标 Python 同时读取 msg["role"] 和 msg["content"]。
@@ -51,7 +57,55 @@ func MessageText(msg openai.ChatCompletionMessageParamUnion) string {
 func MessageRoleAndText(
 	msg openai.ChatCompletionMessageParamUnion,
 ) (string, string) {
-	return MessageRole(msg), MessageText(msg)
+	return MessageRole(msg), MessageTextContent(msg)
+}
+
+// UserTextContent 对标 Python 从 user message 中读取 content 文本。
+//
+// 提取 user message 的可拼接文本；如果是多模态 parts，则合并 text 和必要占位符。
+func UserTextContent(
+	msg openai.ChatCompletionMessageParamUnion,
+) (string, bool) {
+	if msg.OfUser == nil || param.IsOmitted(msg.OfUser) {
+		return "", false
+	}
+
+	return userContentText(msg.OfUser.Content)
+}
+
+// AssistantTextContent 对标 Python 从 assistant message 中读取 content 文本。
+//
+// 提取 assistant message 的可拼接文本，并兼容 refusal content part。
+func AssistantTextContent(
+	msg openai.ChatCompletionMessageParamUnion,
+) (string, bool) {
+	if msg.OfAssistant == nil || param.IsOmitted(msg.OfAssistant) {
+		return "", false
+	}
+
+	text, ok := assistantContentText(msg.OfAssistant.Content)
+	if ok {
+		return text, true
+	}
+
+	if msg.OfAssistant.Refusal.Valid() {
+		return msg.OfAssistant.Refusal.Value, true
+	}
+
+	return "", false
+}
+
+// ToolTextContent 对标 Python tool_result["content"]。
+//
+// 提取 tool message 的文本内容，兼容字符串和 text parts 两种 OpenAI content 形态。
+func ToolTextContent(
+	msg openai.ChatCompletionMessageParamUnion,
+) (string, bool) {
+	if msg.OfTool == nil || param.IsOmitted(msg.OfTool) {
+		return "", false
+	}
+
+	return toolContentText(msg.OfTool.Content)
 }
 
 // IsControlMessage 对标 Python 中保留 system / developer 消息的判断。
@@ -81,19 +135,6 @@ func ToolCallID(msg openai.ChatCompletionMessageParamUnion) string {
 	return msg.OfTool.ToolCallID
 }
 
-// ToolContent 对标 Python tool_result["content"]。
-//
-// 提取 tool message 的文本内容，兼容字符串和 text parts 两种 OpenAI content 形态。
-func ToolContent(
-	msg openai.ChatCompletionMessageParamUnion,
-) (string, bool) {
-	if msg.OfTool == nil || param.IsOmitted(msg.OfTool) {
-		return "", false
-	}
-
-	return toolContentText(msg.OfTool.Content)
-}
-
 // CloneMessages 对标 Python messages.copy()。
 //
 // 对 OpenAI messages 切片做浅拷贝，用于构造 request 副本，避免临时上下文污染真实历史。
@@ -106,7 +147,7 @@ func CloneMessages(
 	return out
 }
 
-func contentText(content any) string {
+func messageContentText(content any) string {
 	switch v := content.(type) {
 	case *string:
 		if v == nil {
@@ -139,6 +180,42 @@ func contentText(content any) string {
 	default:
 		return ""
 	}
+}
+
+func userContentText(
+	content openai.ChatCompletionUserMessageParamContentUnion,
+) (string, bool) {
+	if !param.IsOmitted(content.OfString) {
+		if !content.OfString.Valid() {
+			return "", false
+		}
+
+		return content.OfString.Value, true
+	}
+
+	if !param.IsOmitted(content.OfArrayOfContentParts) {
+		return userPartsText(content.OfArrayOfContentParts), true
+	}
+
+	return "", false
+}
+
+func assistantContentText(
+	content openai.ChatCompletionAssistantMessageParamContentUnion,
+) (string, bool) {
+	if !param.IsOmitted(content.OfString) {
+		if !content.OfString.Valid() {
+			return "", false
+		}
+
+		return content.OfString.Value, true
+	}
+
+	if !param.IsOmitted(content.OfArrayOfContentParts) {
+		return assistantPartsText(content.OfArrayOfContentParts), true
+	}
+
+	return "", false
 }
 
 func toolContentText(
@@ -244,57 +321,3 @@ func fileLabel(file *openai.ChatCompletionContentPartFileFileParam) string {
 
 	return "[file]"
 }
-
-/*
-// messageRoleAndText 是 Go + OpenAI ChatCompletion 的必要适配。
-// Python 的消息是 dict，可以 msg.get("role")；Go 端这里从最终 JSON 形态读取 role/content。
-func messageRoleAndText(
-	msg openai.ChatCompletionMessageParamUnion,
-) (string, string) {
-	b, err := json.Marshal(msg)
-	if err != nil {
-		return "", ""
-	}
-
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return "", ""
-	}
-
-	role, _ := m["role"].(string)
-
-	switch content := m["content"].(type) {
-	case string:
-		return role, content
-
-	case []any:
-		parts := make([]string, 0)
-
-		for _, item := range content {
-			block, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			if text, ok := block["text"].(string); ok {
-				parts = append(parts, text)
-			}
-		}
-
-		return role, strings.Join(parts, " ")
-
-	default:
-		if content == nil {
-			return role, ""
-		}
-
-		raw, err := json.Marshal(content)
-		if err != nil {
-			return role, fmt.Sprintf("%v", content)
-		}
-
-		return role, string(raw)
-	}
-}
-
-*/
