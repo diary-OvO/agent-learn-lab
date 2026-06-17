@@ -131,6 +131,9 @@ func (s Store) RebuildIndex() error {
 
 // ReadIndex 对标 Python read_memory_index。
 // 这个索引适合每轮注入 system prompt，因为它很小。
+// 返回值大概长这样：
+// - [user-preference-tabs](user-preference-tabs.md) — 用户偏好：喜欢用 tabs 展示多视图
+// - [project-agent-loop](project-agent-loop.md) — 项目事实：这是一个 Go 版 agent loop 学习项目
 func (s Store) ReadIndex() (string, error) {
 	raw, err := os.ReadFile(s.Index)
 	if os.IsNotExist(err) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 type ToolSchema struct {
@@ -63,6 +65,17 @@ func (b *ToolBox) Schemas() []ToolSchema {
 	return schemas
 }
 
+// Names 对标 Python TOOL_HANDLERS.keys()。
+//
+// 返回当前 ToolBox 内普通工具的稳定名称列表；不包含 compact 这类外部追加的控制型 schema。
+func (b *ToolBox) Names() []string {
+	if b == nil {
+		return nil
+	}
+
+	return SchemaNames(b.Schemas())
+}
+
 // FunctionTool 是 Tool interface 的一种实现。
 // 能够将一个go的函数包装成一个tool
 type FunctionTool struct {
@@ -91,4 +104,28 @@ func (f *FunctionTool) Schema() ToolSchema {
 }
 func (f *FunctionTool) Call(ctx context.Context, arguments json.RawMessage) (string, error) {
 	return f.fn(ctx, arguments)
+}
+
+// SchemaNames 对标 S10 Python update_context 中的 list(TOOL_HANDLERS.keys())。
+//
+// 从一组 ToolSchema 中提取稳定排序后的工具名，供 system prompt 组装展示当前真实工具能力。
+func SchemaNames(schemas []ToolSchema) []string {
+	if len(schemas) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(schemas))
+
+	for _, schema := range schemas {
+		name := strings.TrimSpace(schema.Name)
+		if name == "" {
+			continue
+		}
+
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
