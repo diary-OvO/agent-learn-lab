@@ -9,6 +9,7 @@ import (
 	"AgentLoop/internal/modelclient"
 	"AgentLoop/internal/openaiadapter"
 	"AgentLoop/internal/permission"
+	"AgentLoop/internal/prompt"
 	"AgentLoop/internal/skills"
 	"AgentLoop/internal/subagent"
 	"bufio"
@@ -56,7 +57,7 @@ func main() {
 	}
 
 	hookBus := hooks.NewHookBus()
-	loopinit.InitS09Hooks(hookBus, checker, workdir)
+	loopinit.InitS10Hooks(hookBus, checker, workdir)
 
 	skillsDir := filepath.Join(workdir, "skills")
 	skillRegistry, err := skills.Scan(skillsDir)
@@ -64,23 +65,35 @@ func main() {
 		panic(err)
 	}
 
-	subToolbox := loopinit.InitS09SubToolbox()
+	subToolbox := loopinit.InitS10SubToolbox()
 
 	subAgent, err := subagent.New(client, subToolbox, hookBus)
 	if err != nil {
 		panic(err)
 	}
 
-	toolbox := loopinit.InitS09Toolbox(subAgent, skillRegistry)
+	toolbox := loopinit.InitS10Toolbox(subAgent, skillRegistry)
 
 	schemas := append(toolbox.Schemas(), compact.CompactToolSchema())
 	chatTools, err := openaiadapter.ToChatCompletionToolsV2(schemas)
 	if err != nil {
 		panic(err)
 	}
+	enabledTools := v2.SchemaNames(schemas)
+	var promptCache prompt.Cache
+
+	promptContext, err := prompt.UpdateContext(
+		workdir,
+		enabledTools,
+		skillRegistry.List(),
+		memStore,
+	)
+	if err != nil {
+		panic(err)
+	}
 
 	messages := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage(buildSystem(workdir, skillRegistry.List(), memStore)),
+		openai.SystemMessage(promptCache.Get(promptContext)),
 	}
 
 	for {
@@ -103,13 +116,36 @@ func main() {
 		if strings.TrimSpace(hookedQuery) != "" {
 			query = hookedQuery
 		}
-		messages = setSystemMessage(
-			messages,
-			buildSystem(workdir, skillRegistry.List(), memStore),
+		// S10：每个用户回合开始前从真实状态更新 prompt context。
+		// 对标 Python: context = update_context(context, history); system = get_system_prompt(context)
+		promptContext, err = prompt.UpdateContext(
+			workdir,
+			enabledTools,
+			skillRegistry.List(),
+			memStore,
 		)
+		if err != nil {
+			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
+		} else {
+			messages = setSystemMessage(messages, promptCache.Get(promptContext))
+		}
 
 		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, memStore, workdir, query, messages, 20)
+		answer, nextMessages, err := runAgentLoop(
+			ctx,
+			client,
+			chatTools,
+			toolbox,
+			hookBus,
+			memStore,
+			&promptCache,
+			enabledTools,
+			skillRegistry.List(),
+			workdir,
+			query,
+			messages,
+			20,
+		)
 		if err != nil {
 			panic(err)
 		}
@@ -134,6 +170,9 @@ func runAgentLoop(
 	toolbox *v2.ToolBox,
 	hookBus *hooks.HookBus,
 	store memory.Store,
+	promptCache *prompt.Cache,
+	enabledTools []string,
+	skillList string,
 	workdir string,
 	currentUserText string,
 	messages []openai.ChatCompletionMessageParamUnion,
@@ -158,6 +197,18 @@ func runAgentLoop(
 	for step := 0; step < maxSteps; step++ {
 		//S08 执行运行前的压缩检测
 		var err error
+
+		promptContext, err := prompt.UpdateContext(
+			workdir,
+			enabledTools,
+			skillList,
+			store,
+		)
+		if err != nil {
+			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
+		} else {
+			messages = setSystemMessage(messages, promptCache.Get(promptContext))
+		}
 
 		preCompress := openaiadapter.CloneMessages(messages)
 
@@ -322,43 +373,6 @@ func shouldReactiveCompact(err error) bool {
 		strings.Contains(s, "context length exceeded") ||
 		strings.Contains(s, "maximum context length") ||
 		strings.Contains(s, "tokens exceed")
-}
-func buildSystem(
-	workdir string,
-	skillList string,
-	store memory.Store,
-) string {
-	index, err := store.ReadIndex()
-	if err != nil {
-		index = ""
-	}
-
-	memoriesSection := ""
-	if strings.TrimSpace(index) != "" {
-		memoriesSection = "\n\nMemories available:\n" + index + "\n"
-	}
-
-	return fmt.Sprintf(
-		"你是一个智能体猫猫娘，位于当前工作区 %s。"+
-			"\n\n可用 Skills：\n%s\n"+
-			"%s"+
-			"\nMemory 规则："+
-			"Relevant memories 会被临时注入到当前请求中。"+
-			"你必须尊重 memory 中记录的用户偏好、反馈、项目事实和参考信息。"+
-			"当用户说“记住”、表达稳定偏好、给出长期约束或项目事实时，回合结束后应提取为 memory。"+
-			"\n\n当任务需要某个 Skill 的完整说明时，使用 load_skill 工具按 name 加载完整 SKILL.md。"+
-			"不要把完整 Skill 内容提前假设进回答；需要时再加载。"+
-			"在开始任何多步骤任务前，必须先使用 todo_write 规划步骤。"+
-			"遇到复杂子问题、需要上下文隔离或独立调查时，优先使用 task 工具启动子智能体，并只接收其最终结论。"+
-			"执行过程中持续更新 todo_write 的状态：开始做某一步前标记为 in_progress，完成后标记为 completed。"+
-			"你可以使用 Bash 和文件工具完成任务。"+
-			"所有破坏性操作都需要用户批准。"+
-			"回答时保持可爱但专业的猫猫娘语气，按状态少量使用 Emoji（如 🐾执行中、✅完成、⚠️注意、❌失败、📌总结）。"+
-			"能用工具验证就验证，直接给结果，不解释身份设定、不输出内部思考、不啰嗦。",
-		workdir,
-		skillList,
-		memoriesSection,
-	)
 }
 func setSystemMessage(
 	messages []openai.ChatCompletionMessageParamUnion,
