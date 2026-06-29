@@ -22,7 +22,7 @@ type CreateTaskArgs struct {
 //
 // 解析工具参数、创建 pending 任务，并返回任务 ID 和依赖信息。
 func executeCreateTask(
-	store tasks.Store,
+	board tasks.Board,
 ) func(context.Context, json.RawMessage) (string, error) {
 	return func(
 		_ context.Context,
@@ -38,7 +38,7 @@ func executeCreateTask(
 			return "", fmt.Errorf("subject is required")
 		}
 
-		task, err := store.Create(args.Subject, args.Description, args.BlockedBy)
+		task, err := board.Create(args.Subject, args.Description, args.BlockedBy)
 		if err != nil {
 			return "", err
 		}
@@ -58,7 +58,7 @@ func executeCreateTask(
 // NewCreateTaskToolV2 对标 Python create_task tool schema。
 //
 // 注册创建持久化任务的工具。
-func NewCreateTaskToolV2(store tasks.Store) v2.Tool {
+func NewCreateTaskToolV2(board tasks.Board) v2.Tool {
 	return v2.NewFunctionTool(
 		"create_task",
 		"Create a new task with optional blockedBy dependencies.",
@@ -84,6 +84,6 @@ func NewCreateTaskToolV2(store tasks.Store) v2.Tool {
 			"required":             []string{"subject"},
 			"additionalProperties": false,
 		},
-		executeCreateTask(store),
+		executeCreateTask(board),
 	)
 }

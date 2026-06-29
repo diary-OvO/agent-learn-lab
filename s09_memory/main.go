@@ -50,7 +50,7 @@ func main() {
 		panic(err)
 	}
 
-	memStore, err := memory.NewStore(workdir)
+	memoryLibrary, err := memory.NewLibrary(workdir)
 	if err != nil {
 		panic(err)
 	}
@@ -80,7 +80,7 @@ func main() {
 	}
 
 	messages := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage(buildSystem(workdir, skillRegistry.List(), memStore)),
+		openai.SystemMessage(buildSystem(workdir, skillRegistry.List(), memoryLibrary)),
 	}
 
 	for {
@@ -105,11 +105,11 @@ func main() {
 		}
 		messages = setSystemMessage(
 			messages,
-			buildSystem(workdir, skillRegistry.List(), memStore),
+			buildSystem(workdir, skillRegistry.List(), memoryLibrary),
 		)
 
 		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, memStore, workdir, query, messages, 20)
+		answer, nextMessages, err := runAgentLoop(ctx, client, chatTools, toolbox, hookBus, memoryLibrary, workdir, query, messages, 20)
 		if err != nil {
 			panic(err)
 		}
@@ -133,7 +133,7 @@ func runAgentLoop(
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
 	hookBus *hooks.HookBus,
-	store memory.Store,
+	library memory.Library,
 	workdir string,
 	currentUserText string,
 	messages []openai.ChatCompletionMessageParamUnion,
@@ -149,7 +149,7 @@ func runAgentLoop(
 	roundsSinceTodo := 0
 	reactiveRetries := 0
 
-	memoriesContent, err := memory.Load(ctx, client, modelID, store, messages)
+	memoriesContent, err := memory.Load(ctx, client, modelID, library, messages)
 	if err != nil {
 		fmt.Printf("\033[33m[Memory load skipped: %v]\033[0m\n", err)
 		memoriesContent = ""
@@ -222,11 +222,11 @@ func runAgentLoop(
 
 			// S09：回合结束后提取 memory，并在达到阈值后 consolidate。
 			// 和 Python 原课一致，这两个步骤失败不应中断主 agent。
-			if _, err := memory.Extract(ctx, client, modelID, store, preCompress); err != nil {
+			if _, err := memory.Extract(ctx, client, modelID, library, preCompress); err != nil {
 				fmt.Printf("\033[33m[Memory extract skipped: %v]\033[0m\n", err)
 			}
 
-			if err := memory.Consolidate(ctx, client, modelID, store); err != nil {
+			if err := memory.Consolidate(ctx, client, modelID, library); err != nil {
 				fmt.Printf("\033[33m[Memory consolidate skipped: %v]\033[0m\n", err)
 			}
 
@@ -326,9 +326,9 @@ func shouldReactiveCompact(err error) bool {
 func buildSystem(
 	workdir string,
 	skillList string,
-	store memory.Store,
+	library memory.Library,
 ) string {
-	index, err := store.ReadIndex()
+	index, err := library.ReadIndex()
 	if err != nil {
 		index = ""
 	}

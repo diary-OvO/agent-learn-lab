@@ -36,7 +36,7 @@ func InitS13SubToolbox() *v2.ToolBox {
 func InitS13Toolbox(
 	subAgent *subagent.SubAgent,
 	skillRegistry *skills.Registry,
-	taskStore tasks.Store,
+	taskBoard tasks.Board,
 ) *v2.ToolBox {
 	return v2.NewToolBox(
 		tools.NewWeatherToolV2(),
@@ -53,10 +53,10 @@ func InitS13Toolbox(
 		tools.NewLoadSkillToolV2(skillRegistry),
 
 		// S12 持久化任务图。
-		tools.NewCreateTaskToolV2(taskStore),
-		tools.NewListTasksToolV2(taskStore),
-		tools.NewGetTaskToolV2(taskStore),
-		tools.NewClaimTaskToolV2(taskStore),
-		tools.NewCompleteTaskToolV2(taskStore),
+		tools.NewCreateTaskToolV2(taskBoard),
+		tools.NewListTasksToolV2(taskBoard),
+		tools.NewGetTaskToolV2(taskBoard),
+		tools.NewClaimTaskToolV2(taskBoard),
+		tools.NewCompleteTaskToolV2(taskBoard),
 	)
 }

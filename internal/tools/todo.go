@@ -30,21 +30,26 @@ type TodoArgs struct {
 	Items []TodoItem `json:"items"`
 }
 
-// TodoManager 在AgentLoop中新建出来的状态管理器，通过function call的形式进行管理
-type TodoManager struct {
+// TodoList 对标 Python todo list session state。
+//
+// 它只维护当前 Agent Loop 会话内的一张任务清单。
+type TodoList struct {
 	mu    sync.Mutex
 	items []TodoItem
 }
 
-func NewTodoManager() *TodoManager {
-	return &TodoManager{
+// NewTodoList 对标 Python todo list 全局状态初始化。
+//
+// 创建当前会话使用的内存任务清单。
+func NewTodoList() *TodoList {
+	return &TodoList{
 		items: make([]TodoItem, 0),
 	}
 }
 
-func (m *TodoManager) Update(items []TodoItem) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (l *TodoList) Update(items []TodoItem) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if len(items) > maxTodos {
 		return "", fmt.Errorf("max %d todos allowed", maxTodos)
@@ -86,27 +91,27 @@ func (m *TodoManager) Update(items []TodoItem) (string, error) {
 		return "", fmt.Errorf("only one task can be in_progress at a time")
 	}
 
-	m.items = validated
-	return m.renderLocked(), nil
+	l.items = validated
+	return l.renderLocked(), nil
 }
 
 // Render 返回当前 todo 状态。
 // 对外读取时加锁，避免和 Update 并发冲突。
-func (m *TodoManager) Render() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.renderLocked()
+func (l *TodoList) Render() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.renderLocked()
 }
 
 // renderLocked 要求调用方已经持有锁。
 // 这样 Update 内部可以避免重复加锁。
-func (m *TodoManager) renderLocked() string {
-	if len(m.items) == 0 {
+func (l *TodoList) renderLocked() string {
+	if len(l.items) == 0 {
 		return "No todos."
 	}
 	var b strings.Builder
 	done := 0
-	for _, item := range m.items {
+	for _, item := range l.items {
 		marker := "[ ]"
 
 		switch item.Status {
@@ -120,11 +125,11 @@ func (m *TodoManager) renderLocked() string {
 		}
 		fmt.Fprintf(&b, "%s #%s: %s\n", marker, item.ID, item.Text)
 	}
-	fmt.Fprintf(&b, "\n(%d/%d completed)", done, len(m.items))
+	fmt.Fprintf(&b, "\n(%d/%d completed)", done, len(l.items))
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func executeTodo(manager *TodoManager) func(context.Context, json.RawMessage) (string, error) {
+func executeTodo(list *TodoList) func(context.Context, json.RawMessage) (string, error) {
 	return func(_ context.Context, arguments json.RawMessage) (string, error) {
 		var args TodoArgs
 		if err := json.Unmarshal(arguments, &args); err != nil {
@@ -135,15 +140,15 @@ func executeTodo(manager *TodoManager) func(context.Context, json.RawMessage) (s
 			return "", fmt.Errorf("items is required")
 		}
 
-		return manager.Update(args.Items)
+		return list.Update(args.Items)
 	}
 }
 
-var DefaultTodoManager = NewTodoManager()
+var DefaultTodoList = NewTodoList()
 
-func NewTodoToolV2WithManager(manager *TodoManager) v2.Tool {
-	if manager == nil {
-		manager = NewTodoManager()
+func NewTodoToolV2WithList(list *TodoList) v2.Tool {
+	if list == nil {
+		list = NewTodoList()
 	}
 
 	return v2.NewFunctionTool(
@@ -180,10 +185,10 @@ func NewTodoToolV2WithManager(manager *TodoManager) v2.Tool {
 			"required":             []string{"items"},
 			"additionalProperties": false,
 		},
-		executeTodo(manager),
+		executeTodo(list),
 	)
 }
 
 func NewTodoToolV2() v2.Tool {
-	return NewTodoToolV2WithManager(DefaultTodoManager)
+	return NewTodoToolV2WithList(DefaultTodoList)
 }

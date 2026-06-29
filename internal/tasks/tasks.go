@@ -28,24 +28,24 @@ type Task struct {
 	BlockedBy   []string `json:"blockedBy"`
 }
 
-// Store 对标 Python TASKS_DIR。
+// Board 对标 Python TASKS_DIR。
 //
-// 它只保存 .tasks 目录这一稳定状态，不持有模型、工具箱或 Agent Loop。
-type Store struct {
+// 它表示持久任务板这一稳定状态，负责保存任务并维护 claim/complete 任务图语义。
+type Board struct {
 	Dir string
 }
 
-// NewStore 对标 Python TASKS_DIR.mkdir(exist_ok=True)。
+// NewBoard 对标 Python TASKS_DIR.mkdir(exist_ok=True)。
 //
-// 创建并返回当前工作区的任务存储目录。
-func NewStore(workDir string) (Store, error) {
+// 创建并返回当前工作区的任务板目录。
+func NewBoard(workDir string) (Board, error) {
 	dir := filepath.Join(workDir, ".tasks")
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return Store{}, err
+		return Board{}, err
 	}
 
-	return Store{
+	return Board{
 		Dir: dir,
 	}, nil
 }
@@ -53,7 +53,7 @@ func NewStore(workDir string) (Store, error) {
 // Create 对标 Python create_task。
 //
 // 创建一个 pending 任务，生成简单任务 ID，并立即写入磁盘。
-func (s Store) Create(
+func (b Board) Create(
 	subject string,
 	description string,
 	blockedBy []string,
@@ -75,7 +75,7 @@ func (s Store) Create(
 		task.BlockedBy = []string{}
 	}
 
-	if err := s.Save(task); err != nil {
+	if err := b.Save(task); err != nil {
 		return Task{}, err
 	}
 
@@ -85,8 +85,8 @@ func (s Store) Create(
 // Save 对标 Python save_task。
 //
 // 将完整 Task 以缩进 JSON 写入 .tasks/{id}.json。
-func (s Store) Save(task Task) error {
-	path, err := s.taskPath(task.ID)
+func (b Board) Save(task Task) error {
+	path, err := b.taskPath(task.ID)
 	if err != nil {
 		return err
 	}
@@ -108,8 +108,8 @@ func (s Store) Save(task Task) error {
 // Load 对标 Python load_task。
 //
 // 从任务 ID 对应的 JSON 文件读取完整 Task。
-func (s Store) Load(taskID string) (Task, error) {
-	path, err := s.taskPath(taskID)
+func (b Board) Load(taskID string) (Task, error) {
+	path, err := b.taskPath(taskID)
 	if err != nil {
 		return Task{}, err
 	}
@@ -134,8 +134,8 @@ func (s Store) Load(taskID string) (Task, error) {
 // List 对标 Python list_tasks。
 //
 // 按文件名顺序读取 .tasks/task_*.json 中的所有任务。
-func (s Store) List() ([]Task, error) {
-	entries, err := os.ReadDir(s.Dir)
+func (b Board) List() ([]Task, error) {
+	entries, err := os.ReadDir(b.Dir)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -158,7 +158,7 @@ func (s Store) List() ([]Task, error) {
 
 		taskID := strings.TrimSuffix(filename, ".json")
 
-		task, err := s.Load(taskID)
+		task, err := b.Load(taskID)
 		if err != nil {
 			return nil, err
 		}
@@ -172,8 +172,8 @@ func (s Store) List() ([]Task, error) {
 // Get 对标 Python get_task。
 //
 // 返回单个任务的完整缩进 JSON，供 Agent 跨会话恢复任务细节。
-func (s Store) Get(taskID string) (string, error) {
-	task, err := s.Load(taskID)
+func (b Board) Get(taskID string) (string, error) {
+	task, err := b.Load(taskID)
 	if err != nil {
 		return "", err
 	}
@@ -189,14 +189,14 @@ func (s Store) Get(taskID string) (string, error) {
 // CanStart 对标 Python can_start。
 //
 // 只有 blockedBy 中所有依赖都存在且状态为 completed，任务才可以开始。
-func (s Store) CanStart(taskID string) (bool, error) {
-	task, err := s.Load(taskID)
+func (b Board) CanStart(taskID string) (bool, error) {
+	task, err := b.Load(taskID)
 	if err != nil {
 		return false, err
 	}
 
 	for _, dependencyID := range task.BlockedBy {
-		dependency, err := s.Load(dependencyID)
+		dependency, err := b.Load(dependencyID)
 
 		if os.IsNotExist(err) {
 			// 对标原课：不存在的依赖也视为 blocked。
@@ -217,8 +217,8 @@ func (s Store) CanStart(taskID string) (bool, error) {
 // Claim 对标 Python claim_task。
 //
 // 检查任务仍为 pending 且依赖均已完成，然后设置 owner 并进入 in_progress。
-func (s Store) Claim(taskID string, owner string) (string, error) {
-	task, err := s.Load(taskID)
+func (b Board) Claim(taskID string, owner string) (string, error) {
+	task, err := b.Load(taskID)
 	if err != nil {
 		return "", err
 	}
@@ -231,7 +231,7 @@ func (s Store) Claim(taskID string, owner string) (string, error) {
 		), nil
 	}
 
-	canStart, err := s.CanStart(taskID)
+	canStart, err := b.CanStart(taskID)
 	if err != nil {
 		return "", err
 	}
@@ -240,7 +240,7 @@ func (s Store) Claim(taskID string, owner string) (string, error) {
 		blocked := make([]string, 0)
 
 		for _, dependencyID := range task.BlockedBy {
-			dependency, err := s.Load(dependencyID)
+			dependency, err := b.Load(dependencyID)
 
 			if os.IsNotExist(err) {
 				blocked = append(blocked, dependencyID)
@@ -264,7 +264,7 @@ func (s Store) Claim(taskID string, owner string) (string, error) {
 	task.Owner = &ownerCopy
 	task.Status = StatusInProgress
 
-	if err := s.Save(task); err != nil {
+	if err := b.Save(task); err != nil {
 		return "", err
 	}
 
@@ -284,8 +284,8 @@ func (s Store) Claim(taskID string, owner string) (string, error) {
 // Complete 对标 Python complete_task。
 //
 // 将 in_progress 任务设为 completed，并报告当前已经满足依赖的下游 pending 任务。
-func (s Store) Complete(taskID string) (string, error) {
-	task, err := s.Load(taskID)
+func (b Board) Complete(taskID string) (string, error) {
+	task, err := b.Load(taskID)
 	if err != nil {
 		return "", err
 	}
@@ -300,7 +300,7 @@ func (s Store) Complete(taskID string) (string, error) {
 
 	task.Status = StatusCompleted
 
-	if err := s.Save(task); err != nil {
+	if err := b.Save(task); err != nil {
 		return "", err
 	}
 
@@ -309,7 +309,7 @@ func (s Store) Complete(taskID string) (string, error) {
 		task.Subject,
 	)
 
-	allTasks, err := s.List()
+	allTasks, err := b.List()
 	if err != nil {
 		return "", err
 	}
@@ -322,7 +322,7 @@ func (s Store) Complete(taskID string) (string, error) {
 			continue
 		}
 
-		canStart, err := s.CanStart(candidate.ID)
+		canStart, err := b.CanStart(candidate.ID)
 		if err != nil {
 			return "", err
 		}
@@ -353,7 +353,7 @@ func (s Store) Complete(taskID string) (string, error) {
 // taskPath 对标 Python _task_path。
 //
 // 将任务 ID 映射到 .tasks/{id}.json，并防止任务 ID 逃出任务目录。
-func (s Store) taskPath(taskID string) (string, error) {
+func (b Board) taskPath(taskID string) (string, error) {
 	taskID = strings.TrimSpace(taskID)
 
 	if taskID == "" ||
@@ -364,5 +364,5 @@ func (s Store) taskPath(taskID string) (string, error) {
 		return "", fmt.Errorf("invalid task id %q", taskID)
 	}
 
-	return filepath.Join(s.Dir, taskID+".json"), nil
+	return filepath.Join(b.Dir, taskID+".json"), nil
 }

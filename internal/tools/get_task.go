@@ -14,7 +14,7 @@ import (
 //
 // 根据 task_id 返回完整任务 JSON；任务不存在时返回可读错误。
 func executeGetTask(
-	store tasks.Store,
+	board tasks.Board,
 ) func(context.Context, json.RawMessage) (string, error) {
 	return func(
 		_ context.Context,
@@ -30,7 +30,7 @@ func executeGetTask(
 			return "", fmt.Errorf("task_id is required")
 		}
 
-		result, err := store.Get(args.TaskID)
+		result, err := board.Get(args.TaskID)
 		if os.IsNotExist(err) {
 			return fmt.Sprintf("Error: Task %s not found", args.TaskID), nil
 		}
@@ -45,7 +45,7 @@ func executeGetTask(
 // NewGetTaskToolV2 对标 Python get_task tool schema。
 //
 // 注册读取单个任务完整信息的工具。
-func NewGetTaskToolV2(store tasks.Store) v2.Tool {
+func NewGetTaskToolV2(board tasks.Board) v2.Tool {
 	return v2.NewFunctionTool(
 		"get_task",
 		"Get full details of a specific task by ID.",
@@ -60,6 +60,6 @@ func NewGetTaskToolV2(store tasks.Store) v2.Tool {
 			"required":             []string{"task_id"},
 			"additionalProperties": false,
 		},
-		executeGetTask(store),
+		executeGetTask(board),
 	)
 }

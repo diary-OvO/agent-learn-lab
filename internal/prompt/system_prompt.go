@@ -20,7 +20,7 @@ type PromptContext struct {
 
 // Cache 对标 Python _last_context_key / _last_prompt。
 //
-// 它只缓存上一份 context 对应的 system prompt，避免同一进程内重复字符串组装；不是 Prompt Manager。
+// 它只缓存上一份 context 对应的 system prompt，避免同一进程内重复字符串组装；不是独立提示词管理器。
 type Cache struct {
 	lastContextKey string
 	lastPrompt     string
@@ -55,9 +55,9 @@ func UpdateContext(
 	workDir string,
 	tools []string,
 	skills string,
-	store memory.Store,
+	library memory.Library,
 ) (PromptContext, error) {
-	memories, err := store.ReadIndex()
+	memories, err := library.ReadIndex()
 	if err != nil {
 		return PromptContext{}, err
 	}

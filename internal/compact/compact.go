@@ -48,15 +48,6 @@ var (
 	PERSIST_THRESHOLD = 300000
 )
 
-type Manager struct {
-	client openai.Client
-	model  string
-
-	workdir        string
-	transcriptDir  string
-	toolResultsDir string
-}
-
 func CompactToolSchema() v2.ToolSchema {
 	return v2.ToolSchema{
 		Name:        "compact",

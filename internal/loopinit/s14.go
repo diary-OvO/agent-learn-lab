@@ -1,6 +1,7 @@
 package loopinit
 
 import (
+	"AgentLoop/internal/cron"
 	"AgentLoop/internal/hooks"
 	"AgentLoop/internal/permission"
 	"AgentLoop/internal/skills"
@@ -11,40 +12,43 @@ import (
 	v2 "AgentLoop/internal/toolkit/v2"
 )
 
-// InitS12Hooks 对标 S12 继承已有 hook。
+// InitS14Hooks 对标 S14 继承 S13 hook。
 //
-// S12 新增任务系统，不新增 hook 类型或 hook 执行时机。
-func InitS12Hooks(
+// S14 新增 cron 调度器，但不新增 hook 类型或 hook 执行时机。
+func InitS14Hooks(
 	hookBus *hooks.HookBus,
 	checker *permission.PermissionChecker,
 	workDir string,
 ) {
-	InitS11Hooks(hookBus, checker, workDir)
+	InitS13Hooks(hookBus, checker, workDir)
 }
 
-// InitS12SubToolbox 对标 S12 主任务系统只属于主 Agent。
+// InitS14SubToolbox 对标 S14 cron 只唤醒主 Agent。
 //
-// 子 Agent 继续沿用 S11 工具箱，不直接修改主 Agent 的持久任务图。
-func InitS12SubToolbox() *v2.ToolBox {
-	return InitS11SubToolbox()
+// 子 Agent 继续使用 S13 同步工具箱，避免 cron 生命周期扩散到子 Agent。
+func InitS14SubToolbox() *v2.ToolBox {
+	return InitS13SubToolbox()
 }
 
-// InitS12Toolbox 对标 Python S12 TOOLS。
+// InitS14Toolbox 对标 Python S14 TOOLS。
 //
-// 在 S11 已有工具基础上新增 create/list/get/claim/complete 五个持久任务工具。
-func InitS12Toolbox(
+// 在 S13 后台任务工具基础上新增 schedule_cron、list_crons、cancel_cron。
+func InitS14Toolbox(
 	subAgent *subagent.SubAgent,
 	skillRegistry *skills.Registry,
 	taskBoard tasks.Board,
+	cronScheduler *cron.Scheduler,
 ) *v2.ToolBox {
 	return v2.NewToolBox(
 		tools.NewWeatherToolV2(),
-		tools.NewBashToolV2(),
+
+		tools.NewBashV2ToolV2WithBackground(),
+
 		tools.NewReadFileToolV2(),
 		tools.NewWriteFileToolV2(),
 		tools.NewEditFileToolV2(),
 		tools.NewGlobToolV2(),
-		tools.NewTodoWriteToolV2(),
+
 		tools.NewTaskToolV2(subAgent),
 		tools.NewLoadSkillToolV2(skillRegistry),
 
@@ -53,5 +57,9 @@ func InitS12Toolbox(
 		tools.NewGetTaskToolV2(taskBoard),
 		tools.NewClaimTaskToolV2(taskBoard),
 		tools.NewCompleteTaskToolV2(taskBoard),
+
+		tools.NewScheduleCronToolV2(cronScheduler),
+		tools.NewListCronsToolV2(cronScheduler),
+		tools.NewCancelCronToolV2(cronScheduler),
 	)
 }

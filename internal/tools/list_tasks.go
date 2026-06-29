@@ -13,13 +13,13 @@ import (
 //
 // 读取全部持久化任务，并渲染状态、owner 和 blockedBy。
 func executeListTasks(
-	store tasks.Store,
+	board tasks.Board,
 ) func(context.Context, json.RawMessage) (string, error) {
 	return func(
 		_ context.Context,
 		_ json.RawMessage,
 	) (string, error) {
-		allTasks, err := store.List()
+		allTasks, err := board.List()
 		if err != nil {
 			return "", err
 		}
@@ -65,7 +65,7 @@ func executeListTasks(
 // NewListTasksToolV2 对标 Python list_tasks tool schema。
 //
 // 注册列出全部持久化任务的工具。
-func NewListTasksToolV2(store tasks.Store) v2.Tool {
+func NewListTasksToolV2(board tasks.Board) v2.Tool {
 	return v2.NewFunctionTool(
 		"list_tasks",
 		"List all tasks with status, owner, and dependencies.",
@@ -75,6 +75,6 @@ func NewListTasksToolV2(store tasks.Store) v2.Tool {
 			"required":             []string{},
 			"additionalProperties": false,
 		},
-		executeListTasks(store),
+		executeListTasks(board),
 	)
 }

@@ -13,7 +13,7 @@ import (
 //
 // 认领一个未阻塞的 pending 任务，并将 owner 设置为 agent。
 func executeClaimTask(
-	store tasks.Store,
+	board tasks.Board,
 ) func(context.Context, json.RawMessage) (string, error) {
 	return func(_ context.Context, arguments json.RawMessage) (string, error) {
 		var args TaskIDArgs
@@ -26,14 +26,14 @@ func executeClaimTask(
 			return "", fmt.Errorf("task_id is required")
 		}
 
-		return store.Claim(args.TaskID, "agent")
+		return board.Claim(args.TaskID, "agent")
 	}
 }
 
 // NewClaimTaskToolV2 对标 Python claim_task tool schema。
 //
 // 注册认领 pending 任务的工具。
-func NewClaimTaskToolV2(store tasks.Store) v2.Tool {
+func NewClaimTaskToolV2(board tasks.Board) v2.Tool {
 	return v2.NewFunctionTool(
 		"claim_task",
 		"Claim a pending task. Sets owner and changes status to in_progress.",
@@ -48,6 +48,6 @@ func NewClaimTaskToolV2(store tasks.Store) v2.Tool {
 			"required":             []string{"task_id"},
 			"additionalProperties": false,
 		},
-		executeClaimTask(store),
+		executeClaimTask(board),
 	)
 }

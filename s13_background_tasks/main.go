@@ -2,6 +2,7 @@ package main
 
 import (
 	"AgentLoop/internal/agentconsole"
+	"AgentLoop/internal/background"
 	"AgentLoop/internal/compact"
 	"AgentLoop/internal/hooks"
 	"AgentLoop/internal/loopinit"
@@ -56,18 +57,19 @@ func main() {
 		panic(err)
 	}
 
-	memStore, err := memory.NewStore(workdir)
+	memoryLibrary, err := memory.NewLibrary(workdir)
 	if err != nil {
 		panic(err)
 	}
 	// S12 新增：任务状态保存到 .tasks，而不是 messages。
-	taskStore, err := tasks.NewStore(workdir)
+	taskBoard, err := tasks.NewBoard(workdir)
 	if err != nil {
 		panic(err)
 	}
 
 	hookBus := hooks.NewHookBus()
-	loopinit.InitS12Hooks(hookBus, checker, workdir)
+	loopinit.InitS13Hooks(hookBus, checker, workdir)
+	bgTracker := background.NewTracker()
 
 	skillsDir := filepath.Join(workdir, "skills")
 	skillRegistry, err := skills.Scan(skillsDir)
@@ -75,15 +77,15 @@ func main() {
 		panic(err)
 	}
 
-	subToolbox := loopinit.InitS12SubToolbox()
+	subToolbox := loopinit.InitS13SubToolbox()
 
 	subAgent, err := subagent.New(client, subToolbox, hookBus)
 	if err != nil {
 		panic(err)
 	}
 
-	// S12 新增的五个任务工具在 loopinit 中显式组装。
-	toolbox := loopinit.InitS12Toolbox(subAgent, skillRegistry, taskStore)
+	// S13 在 S12 工具基础上，让 bash schema 暴露 run_in_background。
+	toolbox := loopinit.InitS13Toolbox(subAgent, skillRegistry, taskBoard)
 
 	schemas := append(toolbox.Schemas(), compact.CompactToolSchema())
 	chatTools, err := openaiadapter.ToChatCompletionToolsV2(schemas)
@@ -97,7 +99,7 @@ func main() {
 		workdir,
 		enabledTools,
 		skillRegistry.List(),
-		memStore,
+		memoryLibrary,
 	)
 	if err != nil {
 		panic(err)
@@ -133,7 +135,7 @@ func main() {
 			workdir,
 			enabledTools,
 			skillRegistry.List(),
-			memStore,
+			memoryLibrary,
 		)
 		if err != nil {
 			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
@@ -147,7 +149,8 @@ func main() {
 			chatTools,
 			toolbox,
 			hookBus,
-			memStore,
+			bgTracker,
+			memoryLibrary,
 			&promptCache,
 			enabledTools,
 			skillRegistry.List(),
@@ -180,7 +183,8 @@ func runAgentLoop(
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
 	hookBus *hooks.HookBus,
-	store memory.Store,
+	bgTracker *background.Tracker,
+	library memory.Library,
 	promptCache *prompt.Cache,
 	enabledTools []string,
 	skillList string,
@@ -201,7 +205,7 @@ func runAgentLoop(
 	recoveryState := recovery.NewState(modelID, fallback_modelID)
 	maxTokens := recovery.DefaultMaxTokens
 
-	memoriesContent, err := memory.Load(ctx, client, modelID, store, messages)
+	memoriesContent, err := memory.Load(ctx, client, modelID, library, messages)
 	if err != nil {
 		fmt.Printf("\033[33m[Memory load skipped: %v]\033[0m\n", err)
 		memoriesContent = ""
@@ -211,11 +215,13 @@ func runAgentLoop(
 		//S08 执行运行前的压缩检测
 		var err error
 
+		messages, _ = collectBackgroundNotifications(messages, bgTracker)
+
 		promptContext, err := prompt.UpdateContext(
 			workdir,
 			enabledTools,
 			skillList,
-			store,
+			library,
 		)
 		if err != nil {
 			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
@@ -354,6 +360,12 @@ func runAgentLoop(
 		messages = append(messages, msg.ToParam())
 
 		if len(msg.ToolCalls) == 0 {
+			var injected int
+			messages, injected = collectBackgroundNotifications(messages, bgTracker)
+			if injected > 0 {
+				continue
+			}
+
 			force := hookBus.TriggerStop(ctx, hooks.StopContext{
 				MessageCount:  len(messages),
 				ToolCallCount: toolCallCount,
@@ -368,11 +380,11 @@ func runAgentLoop(
 			}
 
 			// 回合结束后提取 memory，并在达到阈值后 consolidate。
-			if _, err := memory.Extract(ctx, client, modelID, store, preCompress); err != nil {
+			if _, err := memory.Extract(ctx, client, modelID, library, preCompress); err != nil {
 				fmt.Printf("\033[33m[Memory extract skipped: %v]\033[0m\n", err)
 			}
 
-			if err := memory.Consolidate(ctx, client, modelID, store); err != nil {
+			if err := memory.Consolidate(ctx, client, modelID, library); err != nil {
 				fmt.Printf("\033[33m[Memory consolidate skipped: %v]\033[0m\n", err)
 			}
 
@@ -404,7 +416,7 @@ func runAgentLoop(
 				break
 			}
 
-			// S12 的五个任务工具走普通工具执行链。
+			// S13 的后台任务机制只改变工具执行策略，不改变工具调用协议。
 			call := v2.ToolCall{
 				Name: toolCall.Function.Name,
 				Arguments: json.RawMessage(
@@ -430,15 +442,32 @@ func runAgentLoop(
 				continue
 			}
 
-			result, err := toolbox.Execute(ctx, call)
-			if err != nil {
-				result = fmt.Sprintf(`{"error": %q}`, err.Error())
+			if bgTracker != nil && background.ShouldRun(toolCall.Function.Name, call.Arguments) {
+				bgCall := call
+				task := bgTracker.Start(
+					toolCall.ID,
+					toolCall.Function.Name,
+					call.Arguments,
+					func() string {
+						return executeToolCall(ctx, toolbox, hookBus, bgCall)
+					},
+				)
+
+				result := fmt.Sprintf(
+					"[Background task %s started] Command: %s. Result will be available when complete.",
+					task.ID,
+					task.Command,
+				)
+
+				messages = append(
+					messages,
+					openai.ToolMessage(result, toolCall.ID),
+				)
+
+				continue
 			}
-			//工具结束前注入
-			postResult := hookBus.TriggerPostToolUse(ctx, call, result)
-			if strings.TrimSpace(postResult) != "" {
-				result = postResult
-			}
+
+			result := executeToolCall(ctx, toolbox, hookBus, call)
 
 			if toolCall.Function.Name == "todo_write" {
 				roundsSinceTodo = 0
@@ -449,6 +478,8 @@ func runAgentLoop(
 				openai.ToolMessage(result, toolCall.ID),
 			)
 		}
+
+		messages, _ = collectBackgroundNotifications(messages, bgTracker)
 
 		if compactCalled {
 			continue
@@ -464,6 +495,56 @@ func runAgentLoop(
 		}
 	}
 	return "", messages, fmt.Errorf("agent loop reached max steps")
+}
+
+// executeToolCall 对标 Python execute_tool。
+//
+// 统一执行一次工具调用，并保留 Go 端已有的错误包装与 PostToolUse hook。
+func executeToolCall(
+	ctx context.Context,
+	toolbox *v2.ToolBox,
+	hookBus *hooks.HookBus,
+	call v2.ToolCall,
+) string {
+	result, err := toolbox.Execute(ctx, call)
+	if err != nil {
+		result = fmt.Sprintf(`{"error": %q}`, err.Error())
+	}
+
+	postResult := hookBus.TriggerPostToolUse(ctx, call, result)
+	if strings.TrimSpace(postResult) != "" {
+		result = postResult
+	}
+
+	return result
+}
+
+// collectBackgroundNotifications 对标 Python collect_background_results 的注入步骤。
+//
+// OpenAI Chat Completions 需要 tool message 先逐条补齐，因此通知作为后续 user message 追加。
+func collectBackgroundNotifications(
+	messages []openai.ChatCompletionMessageParamUnion,
+	bgTracker *background.Tracker,
+) ([]openai.ChatCompletionMessageParamUnion, int) {
+	if bgTracker == nil {
+		return messages, 0
+	}
+
+	notifications := bgTracker.Collect()
+	if len(notifications) == 0 {
+		return messages, 0
+	}
+
+	for _, notification := range notifications {
+		messages = append(messages, openai.UserMessage(notification))
+	}
+
+	fmt.Printf(
+		"  \033[32m[inject] %d background notification(s)\033[0m\n",
+		len(notifications),
+	)
+
+	return messages, len(notifications)
 }
 
 // setSystemMessage 对标 Python system=get_system_prompt(context)。

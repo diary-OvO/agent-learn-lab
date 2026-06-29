@@ -26,22 +26,26 @@ type TodoWriteArgs struct {
 	Todos []TodoWriteItem `json:"todos"`
 }
 
-// TodoWriteManager
+// TodoWriteList 对标 Python todo_write session state。
+//
 // 它只维护当前 coding session 的任务列表。
-type TodoWriteManager struct {
+type TodoWriteList struct {
 	mu    sync.Mutex
 	todos []TodoWriteItem
 }
 
-func NewTodoWriteManager() *TodoWriteManager {
-	return &TodoWriteManager{
+// NewTodoWriteList 对标 Python todo_write 全局状态初始化。
+//
+// 创建当前会话使用的内存任务列表。
+func NewTodoWriteList() *TodoWriteList {
+	return &TodoWriteList{
 		todos: make([]TodoWriteItem, 0),
 	}
 }
 
-func (m *TodoWriteManager) Update(todos []TodoWriteItem) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (l *TodoWriteList) Update(todos []TodoWriteItem) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	for i, t := range todos {
 		t.Content = strings.TrimSpace(t.Content)
@@ -60,29 +64,29 @@ func (m *TodoWriteManager) Update(todos []TodoWriteItem) (string, error) {
 		todos[i] = t
 	}
 
-	m.todos = todos
+	l.todos = todos
 
 	// 对齐 Python：工具内部打印当前任务列表。
-	fmt.Println(m.renderLocked())
+	fmt.Println(l.renderLocked())
 
-	return fmt.Sprintf("Updated %d tasks", len(m.todos)), nil
+	return fmt.Sprintf("Updated %d tasks", len(l.todos)), nil
 }
 
-func (m *TodoWriteManager) Render() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.renderLocked()
+func (l *TodoWriteList) Render() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.renderLocked()
 }
 
-func (m *TodoWriteManager) renderLocked() string {
-	if len(m.todos) == 0 {
+func (l *TodoWriteList) renderLocked() string {
+	if len(l.todos) == 0 {
 		return "## Current Tasks\n  (empty)"
 	}
 
 	var b strings.Builder
 	b.WriteString("\n\033[33m## Current Tasks\033[0m\n")
 
-	for _, t := range m.todos {
+	for _, t := range l.todos {
 		icon := " "
 
 		switch t.Status {
@@ -99,7 +103,7 @@ func (m *TodoWriteManager) renderLocked() string {
 
 	return strings.TrimRight(b.String(), "\n")
 }
-func executeTodoWrite(manager *TodoWriteManager) func(context.Context, json.RawMessage) (string, error) {
+func executeTodoWrite(list *TodoWriteList) func(context.Context, json.RawMessage) (string, error) {
 	return func(_ context.Context, arguments json.RawMessage) (string, error) {
 		var args TodoWriteArgs
 		if err := json.Unmarshal(arguments, &args); err != nil {
@@ -110,18 +114,18 @@ func executeTodoWrite(manager *TodoWriteManager) func(context.Context, json.RawM
 			return "", fmt.Errorf("todos is required")
 		}
 
-		return manager.Update(args.Todos)
+		return list.Update(args.Todos)
 	}
 }
 
-var DefaultTodoWriteManager = NewTodoWriteManager()
+var DefaultTodoWriteList = NewTodoWriteList()
 
 func NewTodoWriteToolV2() v2.Tool {
-	return NewTodoWriteToolV2WithManager(DefaultTodoWriteManager)
+	return NewTodoWriteToolV2WithList(DefaultTodoWriteList)
 }
-func NewTodoWriteToolV2WithManager(manager *TodoWriteManager) v2.Tool {
-	if manager == nil {
-		manager = NewTodoWriteManager()
+func NewTodoWriteToolV2WithList(list *TodoWriteList) v2.Tool {
+	if list == nil {
+		list = NewTodoWriteList()
 	}
 
 	return v2.NewFunctionTool(
@@ -158,6 +162,6 @@ func NewTodoWriteToolV2WithManager(manager *TodoWriteManager) v2.Tool {
 			"required":             []string{"todos"},
 			"additionalProperties": false,
 		},
-		executeTodoWrite(manager),
+		executeTodoWrite(list),
 	)
 }

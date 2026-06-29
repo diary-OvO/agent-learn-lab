@@ -16,7 +16,10 @@ import (
 
 const ConsolidateThreshold = 10
 
-type Store struct {
+// Library 对标 Python MEMORY_DIR + MEMORY_INDEX。
+//
+// 它表示带索引的记忆库目录，负责读写 memory 文件并维护 MEMORY.md。
+type Library struct {
 	Dir   string
 	Index string
 }
@@ -36,33 +39,36 @@ type memoryJSON struct {
 	Body        string `json:"body"`
 }
 
-func NewStore(workDir string) (Store, error) {
+// NewLibrary 对标 Python MEMORY_DIR.mkdir(exist_ok=True)。
+//
+// 创建并返回当前工作区的记忆库。
+func NewLibrary(workDir string) (Library, error) {
 	dir := filepath.Join(workDir, ".memory")
 	//确保文件夹存在
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return Store{}, err
+		return Library{}, err
 	}
-	return Store{
+	return Library{
 		Dir:   dir,
 		Index: filepath.Join(dir, "MEMORY.md"),
 	}, nil
 }
 
 // Write -> write_memory_file
-func (s Store) Write(
+func (l Library) Write(
 	name string,
 	memType string,
 	description string,
 	body string,
 ) (string, error) {
 
-	if err := os.MkdirAll(s.Dir, 0755); err != nil {
+	if err := os.MkdirAll(l.Dir, 0755); err != nil {
 		return "", err
 	}
 	slug := slugName(name)
 
 	filename := slug + ".md"
-	path := filepath.Join(s.Dir, filename)
+	path := filepath.Join(l.Dir, filename)
 
 	content := fmt.Sprintf(
 		"---\nname: %s\ndescription: %s\ntype: %s\n---\n\n%s\n",
@@ -76,7 +82,7 @@ func (s Store) Write(
 		return "", err
 	}
 
-	if err := s.RebuildIndex(); err != nil {
+	if err := l.RebuildIndex(); err != nil {
 		return "", err
 	}
 
@@ -84,12 +90,12 @@ func (s Store) Write(
 }
 
 // RebuildIndex 对标 Python _rebuild_index。
-func (s Store) RebuildIndex() error {
-	if err := os.MkdirAll(s.Dir, 0755); err != nil {
+func (l Library) RebuildIndex() error {
+	if err := os.MkdirAll(l.Dir, 0755); err != nil {
 		return err
 	}
 
-	entries, err := os.ReadDir(s.Dir)
+	entries, err := os.ReadDir(l.Dir)
 	if err != nil {
 		return err
 	}
@@ -99,7 +105,7 @@ func (s Store) RebuildIndex() error {
 		if entry.IsDir() || entry.Name() == "MEMORY.md" || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-		path := filepath.Join(s.Dir, entry.Name())
+		path := filepath.Join(l.Dir, entry.Name())
 
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -126,7 +132,7 @@ func (s Store) RebuildIndex() error {
 	if len(lines) > 0 {
 		content = strings.Join(lines, "\n") + "\n"
 	}
-	return os.WriteFile(s.Index, []byte(content), 0644)
+	return os.WriteFile(l.Index, []byte(content), 0644)
 }
 
 // ReadIndex 对标 Python read_memory_index。
@@ -134,8 +140,8 @@ func (s Store) RebuildIndex() error {
 // 返回值大概长这样：
 // - [user-preference-tabs](user-preference-tabs.md) — 用户偏好：喜欢用 tabs 展示多视图
 // - [project-agent-loop](project-agent-loop.md) — 项目事实：这是一个 Go 版 agent loop 学习项目
-func (s Store) ReadIndex() (string, error) {
-	raw, err := os.ReadFile(s.Index)
+func (l Library) ReadIndex() (string, error) {
+	raw, err := os.ReadFile(l.Index)
 	if os.IsNotExist(err) {
 		return "", nil
 	}
@@ -148,10 +154,10 @@ func (s Store) ReadIndex() (string, error) {
 
 // ReadFile 对标 Python read_memory_file。
 // 只允许读取 .memory 下的单个文件名，避免 filename 带路径逃逸。
-func (s Store) ReadFile(filename string) (string, error) {
+func (l Library) ReadFile(filename string) (string, error) {
 	filename = filepath.Base(filename)
 
-	path := filepath.Join(s.Dir, filename)
+	path := filepath.Join(l.Dir, filename)
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return "", nil
@@ -165,8 +171,8 @@ func (s Store) ReadFile(filename string) (string, error) {
 
 // List 对标 Python list_memory_files。
 // 读取所有 memory markdown，并解析最小 frontmatter。
-func (s Store) List() ([]Memory, error) {
-	entries, err := os.ReadDir(s.Dir)
+func (l Library) List() ([]Memory, error) {
+	entries, err := os.ReadDir(l.Dir)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -180,7 +186,7 @@ func (s Store) List() ([]Memory, error) {
 		if entry.IsDir() || entry.Name() == "MEMORY.md" || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-		path := filepath.Join(s.Dir, entry.Name())
+		path := filepath.Join(l.Dir, entry.Name())
 
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -214,11 +220,11 @@ func SelectRelevant(
 	ctx context.Context,
 	client openai.Client,
 	model string,
-	store Store,
+	library Library,
 	messages []openai.ChatCompletionMessageParamUnion,
 	maxItems int,
 ) ([]string, error) {
-	files, err := store.List()
+	files, err := library.List()
 	if err != nil {
 		return nil, err
 	}
@@ -317,10 +323,10 @@ func Load(
 	ctx context.Context,
 	client openai.Client,
 	model string,
-	store Store,
+	library Library,
 	messages []openai.ChatCompletionMessageParamUnion,
 ) (string, error) {
-	selected, err := SelectRelevant(ctx, client, model, store, messages, 5)
+	selected, err := SelectRelevant(ctx, client, model, library, messages, 5)
 	if err != nil {
 		return "", err
 	}
@@ -330,7 +336,7 @@ func Load(
 	parts := []string{"<relevant_memories>"}
 
 	for _, filename := range selected {
-		content, err := store.ReadFile(filename)
+		content, err := library.ReadFile(filename)
 		if err != nil {
 			continue
 		}
@@ -349,7 +355,7 @@ func Extract(
 	ctx context.Context,
 	client openai.Client,
 	model string,
-	store Store,
+	library Library,
 	messages []openai.ChatCompletionMessageParamUnion,
 ) (int, error) {
 	start := len(messages) - 10
@@ -373,7 +379,7 @@ func Extract(
 		return 0, nil
 	}
 
-	existing, err := store.List()
+	existing, err := library.List()
 	if err != nil {
 		return 0, err
 	}
@@ -450,7 +456,7 @@ func Extract(
 			memType = "user"
 		}
 
-		if _, err := store.Write(name, memType, item.Description, item.Body); err != nil {
+		if _, err := library.Write(name, memType, item.Description, item.Body); err != nil {
 			return count, err
 		}
 
@@ -470,9 +476,9 @@ func Consolidate(
 	ctx context.Context,
 	client openai.Client,
 	model string,
-	store Store,
+	library Library,
 ) error {
-	files, err := store.List()
+	files, err := library.List()
 	if err != nil {
 		return err
 	}
@@ -531,7 +537,7 @@ func Consolidate(
 		return nil
 	}
 
-	entries, err := os.ReadDir(store.Dir)
+	entries, err := os.ReadDir(library.Dir)
 	if err != nil {
 		return err
 	}
@@ -541,7 +547,7 @@ func Consolidate(
 			continue
 		}
 
-		_ = os.Remove(filepath.Join(store.Dir, entry.Name()))
+		_ = os.Remove(filepath.Join(library.Dir, entry.Name()))
 	}
 
 	written := 0
@@ -561,7 +567,7 @@ func Consolidate(
 			memType = "user"
 		}
 
-		if _, err := store.Write(name, memType, item.Description, item.Body); err != nil {
+		if _, err := library.Write(name, memType, item.Description, item.Body); err != nil {
 			return err
 		}
 
@@ -569,7 +575,7 @@ func Consolidate(
 	}
 
 	if written == 0 {
-		if err := store.RebuildIndex(); err != nil {
+		if err := library.RebuildIndex(); err != nil {
 			return err
 		}
 	}

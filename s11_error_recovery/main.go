@@ -52,7 +52,7 @@ func main() {
 		panic(err)
 	}
 
-	memStore, err := memory.NewStore(workdir)
+	memoryLibrary, err := memory.NewLibrary(workdir)
 	if err != nil {
 		panic(err)
 	}
@@ -87,7 +87,7 @@ func main() {
 		workdir,
 		enabledTools,
 		skillRegistry.List(),
-		memStore,
+		memoryLibrary,
 	)
 	if err != nil {
 		panic(err)
@@ -123,7 +123,7 @@ func main() {
 			workdir,
 			enabledTools,
 			skillRegistry.List(),
-			memStore,
+			memoryLibrary,
 		)
 		if err != nil {
 			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
@@ -137,7 +137,7 @@ func main() {
 			chatTools,
 			toolbox,
 			hookBus,
-			memStore,
+			memoryLibrary,
 			&promptCache,
 			enabledTools,
 			skillRegistry.List(),
@@ -170,7 +170,7 @@ func runAgentLoop(
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
 	hookBus *hooks.HookBus,
-	store memory.Store,
+	library memory.Library,
 	promptCache *prompt.Cache,
 	enabledTools []string,
 	skillList string,
@@ -191,7 +191,7 @@ func runAgentLoop(
 	recoveryState := recovery.NewState(modelID, fallback_modelID)
 	maxTokens := recovery.DefaultMaxTokens
 
-	memoriesContent, err := memory.Load(ctx, client, modelID, store, messages)
+	memoriesContent, err := memory.Load(ctx, client, modelID, library, messages)
 	if err != nil {
 		fmt.Printf("\033[33m[Memory load skipped: %v]\033[0m\n", err)
 		memoriesContent = ""
@@ -205,7 +205,7 @@ func runAgentLoop(
 			workdir,
 			enabledTools,
 			skillList,
-			store,
+			library,
 		)
 		if err != nil {
 			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
@@ -345,11 +345,11 @@ func runAgentLoop(
 			}
 
 			// 回合结束后提取 memory，并在达到阈值后 consolidate。
-			if _, err := memory.Extract(ctx, client, modelID, store, preCompress); err != nil {
+			if _, err := memory.Extract(ctx, client, modelID, library, preCompress); err != nil {
 				fmt.Printf("\033[33m[Memory extract skipped: %v]\033[0m\n", err)
 			}
 
-			if err := memory.Consolidate(ctx, client, modelID, store); err != nil {
+			if err := memory.Consolidate(ctx, client, modelID, library); err != nil {
 				fmt.Printf("\033[33m[Memory consolidate skipped: %v]\033[0m\n", err)
 			}
 
