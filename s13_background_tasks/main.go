@@ -69,6 +69,9 @@ func main() {
 
 	hookBus := hooks.NewHookBus()
 	loopinit.InitS13Hooks(hookBus, checker, workdir)
+
+	// S13 新增：后台任务追踪器内含 sync.Mutex，对标 Python background_lock。
+	// 它保护后台 goroutine 与主 Agent loop 之间共享的任务状态和结果。
 	bgTracker := background.NewTracker()
 
 	skillsDir := filepath.Join(workdir, "skills")

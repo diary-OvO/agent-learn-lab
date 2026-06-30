@@ -4,6 +4,7 @@ import (
 	"AgentLoop/internal/agentconsole"
 	"AgentLoop/internal/background"
 	"AgentLoop/internal/compact"
+	"AgentLoop/internal/cron"
 	"AgentLoop/internal/hooks"
 	"AgentLoop/internal/loopinit"
 	"AgentLoop/internal/memory"
@@ -23,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	v2 "AgentLoop/internal/toolkit/v2"
 
@@ -36,7 +39,8 @@ const (
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	client, _, err := modelclient.NewFromEnv(modelclient.Aliyun())
 	if err != nil {
@@ -67,8 +71,14 @@ func main() {
 		panic(err)
 	}
 
+	// S14 新增：cron.Scheduler 保存计划任务、触发队列和 durable 文件。
+	cronScheduler, err := cron.NewScheduler(workdir)
+	if err != nil {
+		panic(err)
+	}
+
 	hookBus := hooks.NewHookBus()
-	loopinit.InitS13Hooks(hookBus, checker, workdir)
+	loopinit.InitS14Hooks(hookBus, checker, workdir)
 	bgTracker := background.NewTracker()
 
 	skillsDir := filepath.Join(workdir, "skills")
@@ -77,15 +87,15 @@ func main() {
 		panic(err)
 	}
 
-	subToolbox := loopinit.InitS13SubToolbox()
+	subToolbox := loopinit.InitS14SubToolbox()
 
 	subAgent, err := subagent.New(client, subToolbox, hookBus)
 	if err != nil {
 		panic(err)
 	}
 
-	// S13 在 S12 工具基础上，让 bash schema 暴露 run_in_background。
-	toolbox := loopinit.InitS13Toolbox(subAgent, skillRegistry, taskBoard)
+	// S14 在 S13 后台任务基础上新增 schedule_cron/list_crons/cancel_cron。
+	toolbox := loopinit.InitS14Toolbox(subAgent, skillRegistry, taskBoard, cronScheduler)
 
 	schemas := append(toolbox.Schemas(), compact.CompactToolSchema())
 	chatTools, err := openaiadapter.ToChatCompletionToolsV2(schemas)
@@ -109,6 +119,41 @@ func main() {
 		openai.SystemMessage(promptCache.Get(promptContext)),
 	}
 
+	var agentLock sync.Mutex
+
+	cron.StartScheduler(ctx, cronScheduler)
+	fmt.Printf("  \033[35m[cron] scheduler started (%s)\033[0m\n", cronScheduler.DurablePath())
+
+	go queueProcessorLoop(ctx, &agentLock, cronScheduler, func() {
+		answer, nextMessages, err := runAgentTurnLocked(
+			ctx,
+			client,
+			chatTools,
+			toolbox,
+			hookBus,
+			cronScheduler,
+			bgTracker,
+			memoryLibrary,
+			&promptCache,
+			enabledTools,
+			skillRegistry.List(),
+			workdir,
+			"",
+			messages,
+		)
+		if err != nil {
+			fmt.Printf("\033[31m[cron agent turn failed: %v]\033[0m\n", err)
+			return
+		}
+
+		messages = nextMessages
+		if strings.TrimSpace(answer) != "" {
+			fmt.Println(answer)
+			fmt.Println()
+		}
+	})
+	fmt.Println("  \033[35m[queue processor] started\033[0m")
+
 	for {
 		fmt.Print("\033[36m喵喵-go >> \033[0m")
 
@@ -129,41 +174,39 @@ func main() {
 		if strings.TrimSpace(hookedQuery) != "" {
 			query = hookedQuery
 		}
-		// S10：每个用户回合开始前从真实状态更新 prompt context。
-		// 对标 Python: context = update_context(context, history); system = get_system_prompt(context)
-		promptContext, err = prompt.UpdateContext(
-			workdir,
-			enabledTools,
-			skillRegistry.List(),
-			memoryLibrary,
-		)
-		if err != nil {
-			fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
-		} else {
-			messages = setSystemMessage(messages, promptCache.Get(promptContext))
-		}
-		messages = appendUserMessage(messages, query)
-		answer, nextMessages, err := runAgentLoop(
-			ctx,
-			client,
-			chatTools,
-			toolbox,
-			hookBus,
-			bgTracker,
-			memoryLibrary,
-			&promptCache,
-			enabledTools,
-			skillRegistry.List(),
-			workdir,
-			query,
-			messages,
-			20,
-		)
+
+		answer, err := func() (string, error) {
+			agentLock.Lock()
+			defer agentLock.Unlock()
+
+			answer, nextMessages, err := runAgentTurnLocked(
+				ctx,
+				client,
+				chatTools,
+				toolbox,
+				hookBus,
+				cronScheduler,
+				bgTracker,
+				memoryLibrary,
+				&promptCache,
+				enabledTools,
+				skillRegistry.List(),
+				workdir,
+				query,
+				messages,
+			)
+			if err != nil {
+				return "", err
+			}
+
+			messages = nextMessages
+
+			return answer, nil
+		}()
+
 		if err != nil {
 			panic(err)
 		}
-
-		messages = nextMessages
 
 		fmt.Println(answer)
 		fmt.Println()
@@ -177,12 +220,72 @@ func appendUserMessage(
 	return append(messages, openai.UserMessage(user))
 }
 
+// runAgentTurnLocked 对标 Python run_agent_turn_locked。
+//
+// 调用方必须持有 agentLock：用户输入回合先追加 user message；cron 唤醒回合不追加输入，
+// 直接让 runAgentLoop 消费已经触发的 cron_queue。
+func runAgentTurnLocked(
+	ctx context.Context,
+	client openai.Client,
+	toolboxSchema []openai.ChatCompletionToolUnionParam,
+	toolbox *v2.ToolBox,
+	hookBus *hooks.HookBus,
+	cronScheduler *cron.Scheduler,
+	bgTracker *background.Tracker,
+	library memory.Library,
+	promptCache *prompt.Cache,
+	enabledTools []string,
+	skillList string,
+	workdir string,
+	userQuery string,
+	messages []openai.ChatCompletionMessageParamUnion,
+) (string, []openai.ChatCompletionMessageParamUnion, error) {
+	query := strings.TrimSpace(userQuery)
+
+	// S10：每个 Agent 回合开始前从真实状态更新 prompt context。
+	// 对标 Python: context = update_context(context, history); system = get_system_prompt(context)
+	promptContext, err := prompt.UpdateContext(
+		workdir,
+		enabledTools,
+		skillList,
+		library,
+	)
+	if err != nil {
+		fmt.Printf("\033[33m[system prompt context skipped: %v]\033[0m\n", err)
+	} else {
+		messages = setSystemMessage(messages, promptCache.Get(promptContext))
+	}
+
+	if query != "" {
+		messages = appendUserMessage(messages, query)
+	}
+
+	return runAgentLoop(
+		ctx,
+		client,
+		toolboxSchema,
+		toolbox,
+		hookBus,
+		cronScheduler,
+		bgTracker,
+		library,
+		promptCache,
+		enabledTools,
+		skillList,
+		workdir,
+		query,
+		messages,
+		20,
+	)
+}
+
 func runAgentLoop(
 	ctx context.Context,
 	client openai.Client,
 	toolboxSchema []openai.ChatCompletionToolUnionParam,
 	toolbox *v2.ToolBox,
 	hookBus *hooks.HookBus,
+	cronScheduler *cron.Scheduler,
 	bgTracker *background.Tracker,
 	library memory.Library,
 	promptCache *prompt.Cache,
@@ -205,6 +308,8 @@ func runAgentLoop(
 	recoveryState := recovery.NewState(modelID, fallback_modelID)
 	maxTokens := recovery.DefaultMaxTokens
 
+	messages, _ = collectCronNotifications(messages, cronScheduler)
+
 	memoriesContent, err := memory.Load(ctx, client, modelID, library, messages)
 	if err != nil {
 		fmt.Printf("\033[33m[Memory load skipped: %v]\033[0m\n", err)
@@ -215,6 +320,7 @@ func runAgentLoop(
 		//S08 执行运行前的压缩检测
 		var err error
 
+		messages, _ = collectCronNotifications(messages, cronScheduler)
 		messages, _ = collectBackgroundNotifications(messages, bgTracker)
 
 		promptContext, err := prompt.UpdateContext(
@@ -361,6 +467,11 @@ func runAgentLoop(
 
 		if len(msg.ToolCalls) == 0 {
 			var injected int
+			messages, injected = collectCronNotifications(messages, cronScheduler)
+			if injected > 0 {
+				continue
+			}
+
 			messages, injected = collectBackgroundNotifications(messages, bgTracker)
 			if injected > 0 {
 				continue
@@ -480,6 +591,7 @@ func runAgentLoop(
 		}
 
 		messages, _ = collectBackgroundNotifications(messages, bgTracker)
+		messages, _ = collectCronNotifications(messages, cronScheduler)
 
 		if compactCalled {
 			continue
@@ -519,6 +631,73 @@ func executeToolCall(
 	return result
 }
 
+// queueProcessorLoop 对标 Python queue_processor_loop。
+//
+// 它不调度 cron 表达式，只负责在 cron_queue 有任务且主 Agent 空闲时，自动唤醒一轮 Agent。
+func queueProcessorLoop(
+	ctx context.Context,
+	agentLock *sync.Mutex,
+	cronScheduler *cron.Scheduler,
+	runTurn func(),
+) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			if cronScheduler == nil || !cronScheduler.HasQueue() {
+				continue
+			}
+
+			if !agentLock.TryLock() {
+				continue
+			}
+
+			func() {
+				defer agentLock.Unlock()
+
+				if !cronScheduler.HasQueue() {
+					return
+				}
+
+				fmt.Println("\n  \033[35m[queue processor] delivering scheduled work\033[0m")
+				runTurn()
+			}()
+		}
+	}
+}
+
+// collectCronNotifications 对标 Python consume_cron_queue 的注入步骤。
+//
+// OpenAI Chat Completions 仍把触发后的计划任务作为后续 user message 注入真实历史。
+func collectCronNotifications(
+	messages []openai.ChatCompletionMessageParamUnion,
+	cronScheduler *cron.Scheduler,
+) ([]openai.ChatCompletionMessageParamUnion, int) {
+	if cronScheduler == nil {
+		return messages, 0
+	}
+
+	fired := cronScheduler.ConsumeQueue()
+	if len(fired) == 0 {
+		return messages, 0
+	}
+
+	for _, job := range fired {
+		messages = append(messages, openai.UserMessage("[Scheduled] "+job.Prompt))
+		fmt.Printf(
+			"  \033[35m[inject cron] %s\033[0m\n",
+			previewRunes(job.Prompt, 50),
+		)
+	}
+
+	return messages, len(fired)
+}
+
 // collectBackgroundNotifications 对标 Python collect_background_results 的注入步骤。
 //
 // OpenAI Chat Completions 需要 tool message 先逐条补齐，因此通知作为后续 user message 追加。
@@ -545,6 +724,22 @@ func collectBackgroundNotifications(
 	)
 
 	return messages, len(notifications)
+}
+
+// previewRunes 对标 Python prompt[:50]。
+//
+// Go 字符串按 byte 切容易截断中文；这里按 rune 截断，只用于终端预览输出。
+func previewRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+
+	return string(runes[:limit])
 }
 
 // setSystemMessage 对标 Python system=get_system_prompt(context)。

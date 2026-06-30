@@ -31,6 +31,9 @@ type Task struct {
 //
 // 它是一个轻量状态容器，只维护当前进程中的后台任务。
 type Tracker struct {
+	// mu 对标 Python background_lock。
+	//
+	// Start 的注册/完成写入和 Collect 的结果取出都通过这把锁保护。
 	mu      sync.Mutex
 	counter int
 	tasks   map[string]Task

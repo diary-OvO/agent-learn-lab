@@ -29,7 +29,7 @@ func executeBash() func(context.Context, json.RawMessage) (string, error) {
 		ctx context.Context,
 		arguments json.RawMessage,
 	) (string, error) {
-		var args BashArgs
+		var args BashArgsV2
 		if err := json.Unmarshal(arguments, &args); err != nil {
 			return "", err
 		}
