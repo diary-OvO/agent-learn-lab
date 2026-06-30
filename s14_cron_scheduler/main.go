@@ -33,9 +33,10 @@ import (
 )
 
 const (
-	modelID          = "deepseek-v4-pro"
-	fallback_modelID = "qwen3.7-plus"
-	compactToolName  = "compact"
+	modelID           = "deepseek-v4-pro"
+	fallbackModelID   = "qwen3.7-plus"
+	compactToolName   = "compact"
+	maxAgentLoopSteps = 20
 )
 
 func main() {
@@ -71,7 +72,9 @@ func main() {
 		panic(err)
 	}
 
-	// S14 新增：cron.Scheduler 保存计划任务、触发队列和 durable 文件。
+	// S14 新增：cron.Scheduler 对标 Python scheduled_jobs / cron_queue / durable file。
+	//
+	// 它只保存计划任务状态，不持有模型客户端，也不直接执行 Agent Loop。
 	cronScheduler, err := cron.NewScheduler(workdir)
 	if err != nil {
 		panic(err)
@@ -119,11 +122,21 @@ func main() {
 		openai.SystemMessage(promptCache.Get(promptContext)),
 	}
 
+	// S14 新增：agentLock 对标 Python agent_lock。
+	//
+	// 用户手动输入和 queue processor 自动交付都必须持有这把锁，
+	// 避免两个 Agent turn 同时读写同一份 messages。
 	var agentLock sync.Mutex
 
+	// S14 新增：独立 scheduler goroutine 对标 Python cron_scheduler_loop。
+	//
+	// 它每秒检查 cron 表达式，命中时只入队，不直接调用 Agent。
 	cron.StartScheduler(ctx, cronScheduler)
 	fmt.Printf("  \033[35m[cron] scheduler started (%s)\033[0m\n", cronScheduler.DurablePath())
 
+	// S14 新增：queue processor goroutine 对标 Python queue_processor_loop。
+	//
+	// 它只在 cron_queue 非空且 Agent 空闲时自动交付一轮 runAgentTurnLocked。
 	go queueProcessorLoop(ctx, &agentLock, cronScheduler, func() {
 		answer, nextMessages, err := runAgentTurnLocked(
 			ctx,
@@ -275,7 +288,7 @@ func runAgentTurnLocked(
 		workdir,
 		query,
 		messages,
-		20,
+		maxAgentLoopSteps,
 	)
 }
 
@@ -305,7 +318,7 @@ func runAgentLoop(
 	toolCallCount := 0
 	roundsSinceTodo := 0
 
-	recoveryState := recovery.NewState(modelID, fallback_modelID)
+	recoveryState := recovery.NewState(modelID, fallbackModelID)
 	maxTokens := recovery.DefaultMaxTokens
 
 	messages, _ = collectCronNotifications(messages, cronScheduler)
