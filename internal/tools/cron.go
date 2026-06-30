@@ -36,10 +36,6 @@ func executeScheduleCron(
 		_ context.Context,
 		arguments json.RawMessage,
 	) (string, error) {
-		if scheduler == nil {
-			return "", fmt.Errorf("cron scheduler is nil")
-		}
-
 		var args ScheduleCronArgs
 		if err := json.Unmarshal(arguments, &args); err != nil {
 			return "", err
@@ -71,7 +67,7 @@ func executeScheduleCron(
 			return "Error: " + err.Error(), nil
 		}
 
-		return fmt.Sprintf("Scheduled %s: %q -> %s", job.ID, job.Cron, job.Prompt), nil
+		return fmt.Sprintf("Scheduled %s: %q → %s", job.ID, job.Cron, job.Prompt), nil
 	}
 }
 
@@ -111,10 +107,10 @@ func executeListCrons(
 
 			fmt.Fprintf(
 				&b,
-				"  %s: %q -> %s [%s, %s]\n",
+				"  %s: %q → %s [%s, %s]\n",
 				job.ID,
 				job.Cron,
-				previewText(prompt, 40),
+				previewRunes(prompt, 40),
 				kind,
 				durability,
 			)
@@ -126,7 +122,7 @@ func executeListCrons(
 
 // executeCancelCron 对标 Python run_cancel_cron。
 //
-// 根据 job_id 删除一个已经注册的 cron 任务。
+// 根据 job_id 取消一个已注册 cron job。
 func executeCancelCron(
 	scheduler *cronstore.Scheduler,
 ) func(context.Context, json.RawMessage) (string, error) {
@@ -148,16 +144,7 @@ func executeCancelCron(
 			return "", fmt.Errorf("job_id is required")
 		}
 
-		job, ok, err := scheduler.Cancel(args.JobID)
-		if err != nil {
-			return "", err
-		}
-
-		if !ok {
-			return fmt.Sprintf("Job %s not found", args.JobID), nil
-		}
-
-		return fmt.Sprintf("Cancelled %s", job.ID), nil
+		return scheduler.Cancel(args.JobID), nil
 	}
 }
 
@@ -234,13 +221,9 @@ func NewCancelCronToolV2(scheduler *cronstore.Scheduler) v2.Tool {
 	)
 }
 
-func previewText(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-
+func previewRunes(text string, limit int) string {
 	runes := []rune(text)
-	if len(runes) <= limit {
+	if limit <= 0 || len(runes) <= limit {
 		return text
 	}
 
