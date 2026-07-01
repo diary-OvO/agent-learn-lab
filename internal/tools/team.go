@@ -172,6 +172,40 @@ func NewSpawnAutonomousTeammateToolV2(spawner *team.Spawner) v2.Tool {
 	)
 }
 
+// NewSpawnWorktreeAutonomousTeammateToolV2 对标 Python S18 spawn_teammate tool schema。
+//
+// 迭代原因：S18 spawn_teammate 仍创建 autonomous teammate，但 teammate 认领绑定 worktree
+// 的任务后要在隔离目录中执行文件和 bash 工具。
+//
+// 与 NewSpawnAutonomousTeammateToolV2 差别：两者注册同名 schema；S17 版本调用
+// SpawnAutonomous，S18 版本调用 SpawnWorktreeAutonomous，旧课程入口显式选择旧函数。
+func NewSpawnWorktreeAutonomousTeammateToolV2(spawner *team.Spawner) v2.Tool {
+	return v2.NewFunctionTool(
+		"spawn_teammate",
+		"Spawn an autonomous teammate agent. It can auto-claim tasks and work inside bound worktrees.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Unique teammate name.",
+				},
+				"role": map[string]any{
+					"type":        "string",
+					"description": "Teammate role, such as researcher, tester, reviewer.",
+				},
+				"prompt": map[string]any{
+					"type":        "string",
+					"description": "Initial task prompt or role instruction for the teammate.",
+				},
+			},
+			"required":             []string{"name", "role", "prompt"},
+			"additionalProperties": false,
+		},
+		executeSpawnWorktreeAutonomousTeammate(spawner),
+	)
+}
+
 // executeSpawnAutonomousTeammate 对标 Python S17 run_spawn_teammate。
 //
 // 解析工具参数并调用 Spawner 启动 autonomous teammate goroutine。
@@ -191,6 +225,29 @@ func executeSpawnAutonomousTeammate(
 		}
 
 		return spawner.SpawnAutonomous(ctx, args.Name, args.Role, args.Prompt)
+	}
+}
+
+// executeSpawnWorktreeAutonomousTeammate 对标 Python S18 run_spawn_teammate。
+//
+// 迭代原因：S18 的参数解析和 S17 相同，但启动的 teammate lifecycle 多了 worktree cwd 绑定。
+//
+// 与 executeSpawnAutonomousTeammate 差别：这里调用 SpawnWorktreeAutonomous；
+// S17 旧 executor 仍调用 SpawnAutonomous。
+func executeSpawnWorktreeAutonomousTeammate(
+	spawner *team.Spawner,
+) func(context.Context, json.RawMessage) (string, error) {
+	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
+		if spawner == nil {
+			return "", fmt.Errorf("teammate spawner is nil")
+		}
+
+		args, err := parseSpawnTeammateArgs(arguments)
+		if err != nil {
+			return "", err
+		}
+
+		return spawner.SpawnWorktreeAutonomous(ctx, args.Name, args.Role, args.Prompt)
 	}
 }
 

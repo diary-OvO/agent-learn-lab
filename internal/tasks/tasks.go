@@ -16,9 +16,10 @@ const (
 	StatusCompleted  = "completed"
 )
 
-// Task 对标 Python Task dataclass。
+// Task 对标 Python S12 Task dataclass，S18 增加 worktree 字段。
 //
 // 表示一个可跨会话持久化、可被认领并带 blockedBy 依赖的任务。
+// S18 的 Worktree 只记录任务绑定的隔离目录名；旧课程创建的 JSON 没有该字段时会自然读成 nil。
 type Task struct {
 	ID          string   `json:"id"`
 	Subject     string   `json:"subject"`
@@ -26,6 +27,7 @@ type Task struct {
 	Status      string   `json:"status"`
 	Owner       *string  `json:"owner"`
 	BlockedBy   []string `json:"blockedBy"`
+	Worktree    *string  `json:"worktree"`
 }
 
 // Board 对标 Python TASKS_DIR。
@@ -202,6 +204,62 @@ func (b Board) ScanUnclaimed() ([]Task, error) {
 	}
 
 	return result, nil
+}
+
+// BindWorktree 对标 Python S18 bind_task_to_worktree。
+//
+// 迭代原因：S18 create_worktree 可以把任务绑定到隔离 worktree，但官方逻辑明确不自动 claim。
+//
+// 与旧函数差别：Claim/ClaimWithOwnerCheck 会改变 owner 和 status；BindWorktree 只写入
+// task.worktree，保持任务 pending，留给 autonomous teammate 后续自行认领。
+func (b Board) BindWorktree(taskID string, worktreeName string) error {
+	task, err := b.Load(taskID)
+	if err != nil {
+		return err
+	}
+
+	worktreeName = strings.TrimSpace(worktreeName)
+	if worktreeName == "" {
+		return fmt.Errorf("worktree name is required")
+	}
+
+	task.Worktree = &worktreeName
+
+	if err := b.Save(task); err != nil {
+		return err
+	}
+
+	fmt.Printf(
+		"  \033[33m[bind] %s -> worktree:%s\033[0m\n",
+		task.Subject,
+		worktreeName,
+	)
+
+	return nil
+}
+
+// WorktreeOf 对标 Python S18 load_task(task_id).worktree。
+//
+// 迭代原因：S18 teammate 在认领任务后需要知道是否切换到任务绑定的 worktree cwd。
+//
+// 与直接 Load 差别：Load 返回完整任务；WorktreeOf 只表达“这个任务有没有绑定 worktree”
+// 这一课程语义，调用方不用重复处理 nil、空白和 trim。
+func (b Board) WorktreeOf(taskID string) (string, bool, error) {
+	task, err := b.Load(taskID)
+	if err != nil {
+		return "", false, err
+	}
+
+	if task.Worktree == nil {
+		return "", false, nil
+	}
+
+	name := strings.TrimSpace(*task.Worktree)
+	if name == "" {
+		return "", false, nil
+	}
+
+	return name, true, nil
 }
 
 // Get 对标 Python get_task。

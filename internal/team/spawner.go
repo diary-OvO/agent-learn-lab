@@ -4,6 +4,7 @@ import (
 	"AgentLoop/internal/openaiadapter"
 	"AgentLoop/internal/tasks"
 	v2 "AgentLoop/internal/toolkit/v2"
+	"AgentLoop/internal/worktree"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,17 +24,34 @@ const (
 
 type ToolboxFactory func(agentName string) *v2.ToolBox
 
+// WorktreeToolboxFactory 对标 Python S18 teammate sub_handlers 闭包。
+//
+// 迭代原因：S18 teammate 的 bash/read/write 需要读取当前 cwd，claim/complete 又要回调
+// Spawner 更新 cwd；Go 端用 factory 注入这些闭包，避免 team 包 import tools 包造成循环依赖。
+//
+// 与 ToolboxFactory 差别：S17 只按 agentName 创建固定工具箱；S18 版本还传入
+// cwdProvider、afterClaim、afterComplete 三个生命周期闭包。
+type WorktreeToolboxFactory func(
+	agentName string,
+	cwdProvider func() string,
+	afterClaim func(tasks.Task),
+	afterComplete func(tasks.Task),
+) *v2.ToolBox
+
 // Spawner 对标 Python active_teammates + spawn_teammate_thread。
 //
 // S15 使用 SpawnLimited：最多 10 轮后自然退出。
 // S16 使用 SpawnPersistent：无工具调用时进入 inbox idle loop，等待后续协议或消息。
 // S17 使用 SpawnAutonomous：persistent 基础上增加空闲任务扫描和自动认领。
+// S18 使用 SpawnWorktreeAutonomous：S17 基础上让 teammate 的工具 cwd 跟随 task.worktree。
 type Spawner struct {
-	client     openai.Client
-	model      string
-	bus        *MessageBus
-	board      tasks.Board
-	newToolbox ToolboxFactory
+	client             openai.Client
+	model              string
+	bus                *MessageBus
+	board              tasks.Board
+	worktrees          *worktree.Store
+	newToolbox         ToolboxFactory
+	newWorktreeToolbox WorktreeToolboxFactory
 
 	mu     sync.Mutex
 	active map[string]bool
@@ -76,6 +94,32 @@ func NewAutonomousSpawner(
 		board:      board,
 		newToolbox: newToolbox,
 		active:     make(map[string]bool),
+	}
+}
+
+// NewWorktreeAutonomousSpawner 对标 Python S18 active_teammates 初始化。
+//
+// 迭代原因：S18 在 S17 autonomous teammate 基础上新增 worktree cwd 绑定，
+// Spawner 需要同时知道任务板和 worktree store，并给 teammate 工具箱注入 cwdProvider。
+//
+// 与 NewAutonomousSpawner 差别：S17 构造函数只需要 task board 和普通 toolboxFactory；
+// S18 版本额外注入 worktree.Store 和 WorktreeToolboxFactory，旧构造函数保持不变。
+func NewWorktreeAutonomousSpawner(
+	client openai.Client,
+	model string,
+	bus *MessageBus,
+	board tasks.Board,
+	worktrees *worktree.Store,
+	newToolbox WorktreeToolboxFactory,
+) *Spawner {
+	return &Spawner{
+		client:             client,
+		model:              model,
+		bus:                bus,
+		board:              board,
+		worktrees:          worktrees,
+		newWorktreeToolbox: newToolbox,
+		active:             make(map[string]bool),
 	}
 }
 
@@ -183,6 +227,54 @@ func (s *Spawner) SpawnAutonomous(
 	return fmt.Sprintf("Teammate %q spawned as %s (autonomous)", name, role), nil
 }
 
+// SpawnWorktreeAutonomous 对标 Python S18 spawn_teammate_thread。
+//
+// 迭代原因：S18 teammate 仍是 autonomous lifecycle，但认领绑定 worktree 的 task 后，
+// bash/read_file/write_file 必须切到对应 .worktrees/{name}。
+//
+// 与 SpawnAutonomous 差别：S17 只自动认领任务并在主工作区执行工具；S18 版本增加
+// task.worktree -> current cwd 绑定，旧 SpawnAutonomous 保持原逻辑。
+func (s *Spawner) SpawnWorktreeAutonomous(
+	ctx context.Context,
+	name string,
+	role string,
+	initialPrompt string,
+) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("teammate spawner is nil")
+	}
+	if s.worktrees == nil {
+		return "", fmt.Errorf("worktree store is nil")
+	}
+	if s.newWorktreeToolbox == nil {
+		return "", fmt.Errorf("worktree toolbox factory is nil")
+	}
+
+	name, role, initialPrompt, reserved, err := s.reserveTeammate(
+		name,
+		role,
+		initialPrompt,
+	)
+	if err != nil {
+		return "", err
+	}
+	if !reserved {
+		return fmt.Sprintf("Teammate %q already exists", name), nil
+	}
+
+	system := teammateWorktreeAutonomousSystemPrompt(name, role)
+
+	go s.runWorktreeAutonomousTeammate(ctx, name, role, system, initialPrompt)
+
+	fmt.Printf(
+		"  \033[36m[teammate] %s spawned as %s (worktree autonomous)\033[0m\n",
+		name,
+		role,
+	)
+
+	return fmt.Sprintf("Teammate %q spawned as %s (worktree autonomous)", name, role), nil
+}
+
 // HasActive 对标 Python active_teammates 非空判断。
 //
 // 用于 Lead 侧只在所有 teammate 完成且 inbox/background 已清空后打印完成提示。
@@ -256,6 +348,24 @@ func teammateAutonomousSystemPrompt(name string, role string) string {
 			"When asked for a plan, use submit_plan and wait for plan_approval_response before continuing. "+
 			"When shutdown_request arrives, stop gracefully. "+
 			"When idle, inspect the task board, claim unowned unblocked tasks for yourself, complete them, and report progress.",
+		name,
+		role,
+	)
+}
+
+// teammateWorktreeAutonomousSystemPrompt 构造 S18 teammate system prompt。
+//
+// 迭代原因：S18 teammate 除了自驱任务板，还必须理解“绑定 worktree 的任务要在该目录工作”。
+//
+// 与 teammateAutonomousSystemPrompt 差别：S17 prompt 只说明 idle claim；S18 prompt
+// 额外说明 task.worktree 对工具 cwd 的影响。
+func teammateWorktreeAutonomousSystemPrompt(name string, role string) string {
+	return fmt.Sprintf(
+		"You are %q, a %s. Use tools to complete tasks. Send results via send_message to 'lead'. "+
+			"When asked for a plan, use submit_plan and wait for plan_approval_response before continuing. "+
+			"When shutdown_request arrives, stop gracefully. "+
+			"When idle, inspect the task board, claim unowned unblocked tasks for yourself, complete them, and report progress. "+
+			"If a claimed task has a worktree, your bash/read_file/write_file tools run in that worktree directory.",
 		name,
 		role,
 	)
@@ -455,6 +565,179 @@ func (s *Spawner) runAutonomousTeammate(
 	}
 
 	s.sendSummary(name, messages)
+}
+
+// runWorktreeAutonomousTeammate 对标 Python S18 teammate lifecycle。
+//
+// 迭代原因：S18 在 S17 WORK -> IDLE 循环上增加 current worktree cwd；
+// teammate 认领绑定 worktree 的任务后，工具箱中的 bash/read/write 都应切到该目录。
+//
+// 与 runAutonomousTeammate 差别：S17 工具箱固定在主工作区；S18 版本为工具箱注入
+// cwdProvider、afterClaim、afterComplete，让 cwd 随任务认领和完成而变化。
+func (s *Spawner) runWorktreeAutonomousTeammate(
+	ctx context.Context,
+	name string,
+	role string,
+	system string,
+	initialPrompt string,
+) {
+	defer s.finishTeammate(name)
+
+	currentCWD := ""
+
+	setCWDFromTask := func(task tasks.Task) {
+		currentCWD = ""
+
+		if task.Worktree == nil || strings.TrimSpace(*task.Worktree) == "" {
+			return
+		}
+		if s.worktrees == nil {
+			fmt.Printf(
+				"  \033[33m[worktree cwd] %s skipped: worktree store is nil\033[0m\n",
+				name,
+			)
+			return
+		}
+
+		path, err := s.worktrees.Path(*task.Worktree)
+		if err != nil {
+			fmt.Printf(
+				"  \033[33m[worktree cwd] %s skipped: %v\033[0m\n",
+				name,
+				err,
+			)
+			return
+		}
+
+		currentCWD = path
+
+		fmt.Printf(
+			"  \033[33m[worktree cwd] %s -> %s\033[0m\n",
+			name,
+			currentCWD,
+		)
+	}
+
+	clearCWD := func(_ tasks.Task) {
+		if currentCWD != "" {
+			fmt.Printf(
+				"  \033[33m[worktree cwd] %s -> main workspace\033[0m\n",
+				name,
+			)
+		}
+
+		currentCWD = ""
+	}
+
+	cwdProvider := func() string {
+		return currentCWD
+	}
+
+	toolbox, chatTools, err := s.teammateWorktreeToolbox(
+		name,
+		cwdProvider,
+		setCWDFromTask,
+		clearCWD,
+	)
+	if err != nil {
+		_ = s.bus.Send(name, "lead", "Failed to initialize teammate tools: "+err.Error(), "error")
+		return
+	}
+
+	messages := []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(initialPrompt),
+	}
+
+	for {
+		messages = ensureTeammateIdentity(messages, name, role)
+
+		shouldStop := false
+
+		for round := 0; round < teammateMaxRounds; round++ {
+			inbox, err := s.bus.ReadInbox(name)
+			if err == nil && len(inbox) > 0 {
+				var shouldRun bool
+
+				messages, shouldRun, shouldStop = s.applyPersistentInbox(
+					name,
+					messages,
+					inbox,
+				)
+				if shouldStop {
+					break
+				}
+				if !shouldRun {
+					continue
+				}
+			}
+
+			var usedTools bool
+
+			messages, usedTools, err = s.runOneTeammateTurn(
+				ctx,
+				system,
+				messages,
+				toolbox,
+				chatTools,
+			)
+			if err != nil {
+				_ = s.bus.Send(name, "lead", "Teammate error: "+err.Error(), "error")
+				return
+			}
+
+			if !usedTools {
+				break
+			}
+		}
+
+		if shouldStop {
+			break
+		}
+
+		var shouldContinue bool
+		messages, shouldContinue = s.idlePollWorktreeAutonomous(
+			ctx,
+			name,
+			role,
+			messages,
+			setCWDFromTask,
+		)
+		if !shouldContinue {
+			break
+		}
+	}
+
+	s.sendSummary(name, messages)
+}
+
+// teammateWorktreeToolbox 对标 Python S18 sub_tools/sub_handlers 构造。
+//
+// 迭代原因：S18 teammate 工具箱需要携带当前 cwd 和 claim/complete 回调，普通
+// teammateToolbox(name) 已无法表达这些运行时闭包。
+//
+// 与 teammateToolbox 差别：旧 helper 只按 agentName 生成固定工具箱；这里额外注入
+// cwdProvider、afterClaim、afterComplete，专供 SpawnWorktreeAutonomous 使用。
+func (s *Spawner) teammateWorktreeToolbox(
+	name string,
+	cwdProvider func() string,
+	afterClaim func(tasks.Task),
+	afterComplete func(tasks.Task),
+) (*v2.ToolBox, []openai.ChatCompletionToolUnionParam, error) {
+	if s.newWorktreeToolbox == nil {
+		return nil, nil, fmt.Errorf("worktree toolbox factory is nil")
+	}
+
+	toolbox := s.newWorktreeToolbox(name, cwdProvider, afterClaim, afterComplete)
+	if toolbox == nil {
+		return nil, nil, fmt.Errorf("toolbox is nil")
+	}
+
+	chatTools, err := openaiadapter.ToChatCompletionToolsV2(toolbox.Schemas())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return toolbox, chatTools, nil
 }
 
 func (s *Spawner) teammateToolbox(
@@ -659,6 +942,111 @@ func (s *Spawner) idlePollAutonomous(
 	}
 }
 
+// idlePollWorktreeAutonomous 对标 Python S18 idle_poll。
+//
+// 迭代原因：S18 IDLE 阶段自动 claim 后，如果 task.worktree 存在，需要把 teammate
+// 的工具 cwd 切到对应 worktree，并把工作目录提示注入给模型。
+//
+// 与 idlePollAutonomous 差别：S17 只追加任务描述；S18 版本在 claim 成功后调用
+// afterClaim，并在消息里附带 Work directory。
+func (s *Spawner) idlePollWorktreeAutonomous(
+	ctx context.Context,
+	name string,
+	role string,
+	messages []openai.ChatCompletionMessageParamUnion,
+	afterClaim func(tasks.Task),
+) ([]openai.ChatCompletionMessageParamUnion, bool) {
+	ticker := time.NewTicker(teammateAutonomousIdlePollInterval)
+	defer ticker.Stop()
+
+	timeout := time.NewTimer(teammateAutonomousIdleTimeout)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return messages, false
+
+		case <-timeout.C:
+			fmt.Printf(
+				"  \033[31m[idle] %s timeout (%s)\033[0m\n",
+				name,
+				teammateAutonomousIdleTimeout,
+			)
+
+			return messages, false
+
+		case <-ticker.C:
+			inbox, err := s.bus.ReadInbox(name)
+			if err == nil && len(inbox) > 0 {
+				var shouldRun bool
+				var shouldStop bool
+
+				messages, shouldRun, shouldStop = s.applyPersistentInbox(
+					name,
+					messages,
+					inbox,
+				)
+				if shouldStop {
+					return messages, false
+				}
+				if shouldRun {
+					fmt.Printf(
+						"  \033[36m[idle] %s found inbox work\033[0m\n",
+						name,
+					)
+
+					return ensureTeammateIdentity(messages, name, role), true
+				}
+			}
+
+			task, claimed, err := s.claimNextWorktreeTask(name)
+			if err != nil {
+				fmt.Printf(
+					"  \033[33m[idle] %s scan failed: %v\033[0m\n",
+					name,
+					err,
+				)
+
+				continue
+			}
+			if !claimed {
+				continue
+			}
+
+			if afterClaim != nil {
+				afterClaim(task)
+			}
+
+			worktreeInfo := ""
+			if task.Worktree != nil && strings.TrimSpace(*task.Worktree) != "" && s.worktrees != nil {
+				if path, err := s.worktrees.Path(*task.Worktree); err == nil {
+					worktreeInfo = "\nWork directory: " + path
+				}
+			}
+
+			messages = append(
+				messages,
+				openai.UserMessage(fmt.Sprintf(
+					"[Autonomous task claimed]\nTask %s: %s%s\n\n%s",
+					task.ID,
+					task.Subject,
+					worktreeInfo,
+					task.Description,
+				)),
+			)
+
+			fmt.Printf(
+				"  \033[32m[idle] %s auto-claimed: %s\033[0m\n",
+				name,
+				task.Subject,
+			)
+
+			return ensureTeammateIdentity(messages, name, role), true
+		}
+	}
+}
+
 // claimNextAutonomousTask 从任务板中认领一个 S17 autonomous task。
 //
 // 迭代原因：idlePollAutonomous 需要一个可复用的小步骤，把“扫描候选任务”和“带 owner 检查认领”合在一起。
@@ -688,6 +1076,50 @@ func (s *Spawner) claimNextAutonomousTask(name string) (tasks.Task, bool, error)
 			name,
 			result,
 		)
+	}
+
+	return tasks.Task{}, false, nil
+}
+
+// claimNextWorktreeTask 从任务板中认领一个 S18 autonomous task。
+//
+// 迭代原因：S18 auto-claim 成功后需要拿到已经持久化后的 task.worktree，
+// 以便切换 cwd 和注入 Work directory。
+//
+// 与 claimNextAutonomousTask 差别：S17 返回扫描到的原始 task；S18 版本在 ClaimWithOwnerCheck
+// 成功后重新 Load task，确保拿到最新 owner/status/worktree 字段。
+func (s *Spawner) claimNextWorktreeTask(name string) (tasks.Task, bool, error) {
+	if strings.TrimSpace(s.board.Dir) == "" {
+		return tasks.Task{}, false, nil
+	}
+
+	unclaimed, err := s.board.ScanUnclaimed()
+	if err != nil {
+		return tasks.Task{}, false, err
+	}
+
+	for _, task := range unclaimed {
+		result, err := s.board.ClaimWithOwnerCheck(task.ID, name)
+		if err != nil {
+			return tasks.Task{}, false, err
+		}
+
+		if !strings.Contains(result, "Claimed") {
+			fmt.Printf(
+				"  \033[33m[idle] %s claim skipped: %s\033[0m\n",
+				name,
+				result,
+			)
+
+			continue
+		}
+
+		claimed, err := s.board.Load(task.ID)
+		if err != nil {
+			return task, true, nil
+		}
+
+		return claimed, true, nil
 	}
 
 	return tasks.Task{}, false, nil

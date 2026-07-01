@@ -222,6 +222,29 @@ func S17SectionsV2() []SectionV2 {
 	)
 }
 
+// S18SectionsV2 对标 Python S18 PROMPT_SECTIONS 增量。
+//
+// 迭代原因：S18 在 autonomous team 基础上新增 worktree isolation，模型需要知道
+// create_worktree 只绑定 task，不自动 claim，以及 teammate 工具 cwd 会随 task.worktree 变化。
+//
+// 与 S17SectionsV2 差别：S17 只解释 autonomous teammate 的任务板自驱；S18 额外解释
+// create/remove/keep_worktree 的隔离语义和删除保护。
+func S18SectionsV2() []SectionV2 {
+	sections := S17SectionsV2()
+
+	return InsertSectionAfterV2(
+		sections,
+		"autonomous_team",
+		ToolGatedSectionV2(
+			"worktree_isolation",
+			"Worktree isolation：使用 create_worktree 创建 .worktrees/{name} 和 wt/{name} branch，可选 task_id 只写入 task.worktree，不会自动 claim。绑定 worktree 的 task 被 teammate 认领后，teammate 的 bash/read_file/write_file 会在对应 worktree 目录运行。remove_worktree 默认拒绝删除有未提交文件或未推送 commit 的 worktree，除非 discard_changes=true；keep_worktree 用于保留给人工 review。",
+			"create_worktree",
+			"remove_worktree",
+			"keep_worktree",
+		),
+	)
+}
+
 // InsertSectionAfterV2 对标 Python sections.append / 插入 prompt section。
 //
 // 课程可以在基础列表中的指定 section 后插入自己的新增片段。

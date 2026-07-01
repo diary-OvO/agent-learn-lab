@@ -55,7 +55,13 @@ func executeListTasks(
 				dependencies = fmt.Sprintf(" (blockedBy: %s)", strings.Join(task.BlockedBy, ", "))
 			}
 
-			fmt.Fprintf(&b, "  %s %s: %s [%s]%s%s\n", icon, task.ID, task.Subject, task.Status, owner, dependencies)
+			worktreeName := ""
+			if task.Worktree != nil &&
+				strings.TrimSpace(*task.Worktree) != "" {
+				worktreeName = fmt.Sprintf(" (wt:%s)", *task.Worktree)
+			}
+
+			fmt.Fprintf(&b, "  %s %s: %s [%s]%s%s%s\n", icon, task.ID, task.Subject, task.Status, owner, dependencies, worktreeName)
 		}
 
 		return strings.TrimRight(b.String(), "\n"), nil

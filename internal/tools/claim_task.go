@@ -54,6 +54,45 @@ func executeClaimTaskWithOwner(
 	}
 }
 
+// executeClaimTaskWithOwnerAndAfterClaim 对标 Python S18 teammate _run_claim_task。
+//
+// 迭代原因：S18 teammate 认领绑定 worktree 的 task 后，需要立即把自己的工具 cwd
+// 切到 task.worktree 指向的隔离目录。
+//
+// 与 executeClaimTaskWithOwner 差别：S17 版本只返回 claim 结果；S18 版本在 claim 成功后
+// 重新 Load task 并触发 afterClaim 回调，旧函数保持原逻辑不变。
+func executeClaimTaskWithOwnerAndAfterClaim(
+	board tasks.Board,
+	owner string,
+	afterClaim func(tasks.Task),
+) func(context.Context, json.RawMessage) (string, error) {
+	return func(_ context.Context, arguments json.RawMessage) (string, error) {
+		var args TaskIDArgs
+		if err := json.Unmarshal(arguments, &args); err != nil {
+			return "", err
+		}
+
+		args.TaskID = strings.TrimSpace(args.TaskID)
+		if args.TaskID == "" {
+			return "", fmt.Errorf("task_id is required")
+		}
+
+		result, err := board.ClaimWithOwnerCheck(args.TaskID, owner)
+		if err != nil {
+			return "", err
+		}
+
+		if afterClaim != nil && strings.Contains(result, "Claimed") {
+			task, err := board.Load(args.TaskID)
+			if err == nil {
+				afterClaim(task)
+			}
+		}
+
+		return result, nil
+	}
+}
+
 // NewClaimTaskToolV2 对标 Python claim_task tool schema。
 //
 // 注册认领 pending 任务的工具。
@@ -100,5 +139,35 @@ func NewClaimTaskToolV2WithOwner(
 			"additionalProperties": false,
 		},
 		executeClaimTaskWithOwner(board, owner),
+	)
+}
+
+// NewClaimTaskToolV2WithOwnerAndAfterClaim 对标 Python S18 teammate claim_task。
+//
+// 迭代原因：S18 的 claim_task 需要在工具成功后同步 teammate 当前 worktree cwd，
+// 但 S17 之前的 claim_task 不应该感知 cwd。
+//
+// 与 NewClaimTaskToolV2WithOwner 差别：两者注册同名 claim_task schema；S18 版本额外注入
+// afterClaim 回调，只在 S18 teammate toolbox 中显式使用。
+func NewClaimTaskToolV2WithOwnerAndAfterClaim(
+	board tasks.Board,
+	owner string,
+	afterClaim func(tasks.Task),
+) v2.Tool {
+	return v2.NewFunctionTool(
+		"claim_task",
+		"Claim a pending task for this teammate. If the task is bound to a worktree, switch to it.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task_id": map[string]any{
+					"type":        "string",
+					"description": "ID of the task to claim.",
+				},
+			},
+			"required":             []string{"task_id"},
+			"additionalProperties": false,
+		},
+		executeClaimTaskWithOwnerAndAfterClaim(board, owner, afterClaim),
 	)
 }
