@@ -220,6 +220,27 @@ func (t *Tracker) Collect() []string {
 
 	return notifications
 }
+
+// HasCompleted 对标 Python has_pending_background。
+//
+// 非破坏性检查是否存在已经完成、等待注入的后台任务。
+func (t *Tracker) HasCompleted() bool {
+	if t == nil {
+		return false
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, task := range t.tasks {
+		if task.Status == StatusCompleted {
+			return true
+		}
+	}
+
+	return false
+}
+
 func commandLabel(
 	toolName string,
 	arguments json.RawMessage,
