@@ -169,6 +169,41 @@ func (b Board) List() ([]Task, error) {
 	return result, nil
 }
 
+// ScanUnclaimed 对标 Python S17 scan_unclaimed_tasks。
+//
+// 查找 pending、无 owner、且 blockedBy 依赖全部 completed 的任务，供 autonomous teammate 空闲时自动认领。
+// 迭代原因：S12-S16 的任务板只能被工具显式 list/claim，teammate 空闲时没有“自己找活”的入口。
+// 与旧函数差别：List 返回全部任务给模型判断；ScanUnclaimed 只返回可自动认领的最小候选集，避免 S17 idle loop 把 blocked 或已有 owner 的任务误当成工作。
+func (b Board) ScanUnclaimed() ([]Task, error) {
+	allTasks, err := b.List()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]Task, 0)
+
+	for _, task := range allTasks {
+		if task.Status != StatusPending {
+			continue
+		}
+
+		if task.Owner != nil && strings.TrimSpace(*task.Owner) != "" {
+			continue
+		}
+
+		canStart, err := b.CanStart(task.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		if canStart {
+			result = append(result, task)
+		}
+	}
+
+	return result, nil
+}
+
 // Get 对标 Python get_task。
 //
 // 返回单个任务的完整缩进 JSON，供 Agent 跨会话恢复任务细节。
@@ -272,6 +307,88 @@ func (b Board) Claim(taskID string, owner string) (string, error) {
 		"  \033[36m[claim] %s → in_progress (owner: %s)\033[0m\n",
 		task.Subject,
 		owner,
+	)
+
+	return fmt.Sprintf(
+		"Claimed %s (%s)",
+		task.ID,
+		task.Subject,
+	), nil
+}
+
+// ClaimWithOwnerCheck 对标 Python S17 claim_task。
+//
+// S17 新增 owner 检查：任务如果已经有 owner，就不能被 autonomous teammate 覆盖认领。
+// 旧的 Claim 保持原语义，供 S12-S16 课程入口继续按原逻辑使用。
+// 迭代原因：S17 teammate 会并发 idle-poll 任务板，多个 teammate 可能看到同一个 pending task。
+// 与旧函数差别：Claim 只检查 status/dependency 并写入 owner；ClaimWithOwnerCheck 额外拒绝已经有 owner 的任务，用于 autonomous auto-claim 的并发保护。
+func (b Board) ClaimWithOwnerCheck(taskID string, owner string) (string, error) {
+	task, err := b.Load(taskID)
+	if err != nil {
+		return "", err
+	}
+
+	if task.Status != StatusPending {
+		return fmt.Sprintf(
+			"Task %s is %s, cannot claim",
+			taskID,
+			task.Status,
+		), nil
+	}
+
+	if task.Owner != nil && strings.TrimSpace(*task.Owner) != "" {
+		return fmt.Sprintf(
+			"Task %s already owned by %s",
+			taskID,
+			*task.Owner,
+		), nil
+	}
+
+	canStart, err := b.CanStart(taskID)
+	if err != nil {
+		return "", err
+	}
+
+	if !canStart {
+		blocked := make([]string, 0)
+
+		for _, dependencyID := range task.BlockedBy {
+			dependency, err := b.Load(dependencyID)
+
+			if os.IsNotExist(err) {
+				blocked = append(blocked, dependencyID)
+				continue
+			}
+			if err != nil {
+				return "", err
+			}
+
+			if dependency.Status != StatusCompleted {
+				blocked = append(blocked, dependencyID)
+			}
+		}
+
+		raw, _ := json.Marshal(blocked)
+
+		return "Blocked by: " + string(raw), nil
+	}
+
+	ownerCopy := strings.TrimSpace(owner)
+	if ownerCopy == "" {
+		ownerCopy = "agent"
+	}
+
+	task.Owner = &ownerCopy
+	task.Status = StatusInProgress
+
+	if err := b.Save(task); err != nil {
+		return "", err
+	}
+
+	fmt.Printf(
+		"  \033[36m[claim] %s → in_progress (owner: %s)\033[0m\n",
+		task.Subject,
+		ownerCopy,
 	)
 
 	return fmt.Sprintf(

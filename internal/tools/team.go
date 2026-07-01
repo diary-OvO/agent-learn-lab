@@ -140,6 +140,60 @@ func executeSpawnPersistentTeammate(
 	}
 }
 
+// NewSpawnAutonomousTeammateToolV2 对标 Python S17 spawn_teammate tool schema。
+//
+// 注册 Lead 使用的自主版 teammate 创建工具：WORK 后进入 IDLE，空闲时可扫描任务板并自动认领。
+// 迭代原因：S15/S16 的 spawn_teammate 都需要 Lead 给 teammate 明确任务；S17 要让 teammate 空闲时自己从任务板找工作。
+// 与旧函数差别：NewSpawnLimitedTeammateToolV2 保留 10 轮自然退出；NewSpawnPersistentTeammateToolV2 只等待 inbox；NewSpawnAutonomousTeammateToolV2 在 persistent 基础上增加 task board idle-poll。
+func NewSpawnAutonomousTeammateToolV2(spawner *team.Spawner) v2.Tool {
+	return v2.NewFunctionTool(
+		"spawn_teammate",
+		"Spawn an autonomous teammate agent. It can idle-poll the task board and auto-claim work.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Unique teammate name.",
+				},
+				"role": map[string]any{
+					"type":        "string",
+					"description": "Teammate role, such as researcher, tester, reviewer.",
+				},
+				"prompt": map[string]any{
+					"type":        "string",
+					"description": "Initial task prompt or role instruction for the teammate.",
+				},
+			},
+			"required":             []string{"name", "role", "prompt"},
+			"additionalProperties": false,
+		},
+		executeSpawnAutonomousTeammate(spawner),
+	)
+}
+
+// executeSpawnAutonomousTeammate 对标 Python S17 run_spawn_teammate。
+//
+// 解析工具参数并调用 Spawner 启动 autonomous teammate goroutine。
+// 迭代原因：工具 schema 和参数解析可以复用，但启动的生命周期要切换到 S17 autonomous。
+// 与旧函数差别：executeSpawnLimitedTeammate 调用 SpawnLimited；executeSpawnPersistentTeammate 调用 SpawnPersistent；这里调用 SpawnAutonomous。
+func executeSpawnAutonomousTeammate(
+	spawner *team.Spawner,
+) func(context.Context, json.RawMessage) (string, error) {
+	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
+		if spawner == nil {
+			return "", fmt.Errorf("teammate spawner is nil")
+		}
+
+		args, err := parseSpawnTeammateArgs(arguments)
+		if err != nil {
+			return "", err
+		}
+
+		return spawner.SpawnAutonomous(ctx, args.Name, args.Role, args.Prompt)
+	}
+}
+
 func parseSpawnTeammateArgs(arguments json.RawMessage) (SpawnTeammateArgs, error) {
 	var args SpawnTeammateArgs
 	if err := json.Unmarshal(arguments, &args); err != nil {

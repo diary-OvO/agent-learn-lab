@@ -2,6 +2,7 @@ package team
 
 import (
 	"AgentLoop/internal/openaiadapter"
+	"AgentLoop/internal/tasks"
 	v2 "AgentLoop/internal/toolkit/v2"
 	"context"
 	"encoding/json"
@@ -14,8 +15,10 @@ import (
 )
 
 const (
-	teammateMaxRounds        = 10
-	teammateIdlePollInterval = time.Second
+	teammateMaxRounds                  = 10
+	teammateIdlePollInterval           = time.Second
+	teammateAutonomousIdlePollInterval = 5 * time.Second
+	teammateAutonomousIdleTimeout      = 60 * time.Second
 )
 
 type ToolboxFactory func(agentName string) *v2.ToolBox
@@ -24,10 +27,12 @@ type ToolboxFactory func(agentName string) *v2.ToolBox
 //
 // S15 使用 SpawnLimited：最多 10 轮后自然退出。
 // S16 使用 SpawnPersistent：无工具调用时进入 inbox idle loop，等待后续协议或消息。
+// S17 使用 SpawnAutonomous：persistent 基础上增加空闲任务扫描和自动认领。
 type Spawner struct {
 	client     openai.Client
 	model      string
 	bus        *MessageBus
+	board      tasks.Board
 	newToolbox ToolboxFactory
 
 	mu     sync.Mutex
@@ -47,6 +52,28 @@ func NewSpawner(
 		client:     client,
 		model:      model,
 		bus:        bus,
+		newToolbox: newToolbox,
+		active:     make(map[string]bool),
+	}
+}
+
+// NewAutonomousSpawner 对标 Python S17 active_teammates 初始化。
+//
+// 创建 autonomous teammate spawner；旧 NewSpawner 保持 S15/S16 语义，不需要任务板。
+// 迭代原因：S17 idle loop 必须访问任务板，单靠 S15/S16 的 MessageBus + toolboxFactory 已经不够。
+// 与旧函数差别：NewSpawner 只持有通信和工具箱工厂，适合 limited/persistent；NewAutonomousSpawner 额外注入 tasks.Board，只给 autonomous auto-claim 使用。
+func NewAutonomousSpawner(
+	client openai.Client,
+	model string,
+	bus *MessageBus,
+	board tasks.Board,
+	newToolbox ToolboxFactory,
+) *Spawner {
+	return &Spawner{
+		client:     client,
+		model:      model,
+		bus:        bus,
+		board:      board,
 		newToolbox: newToolbox,
 		active:     make(map[string]bool),
 	}
@@ -120,6 +147,42 @@ func (s *Spawner) SpawnPersistent(
 	return fmt.Sprintf("Teammate %q spawned as %s (persistent)", name, role), nil
 }
 
+// SpawnAutonomous 对标 Python S17 spawn_teammate_thread。
+//
+// 自主版 teammate loop：WORK → IDLE → SHUTDOWN，IDLE 阶段会扫描任务板并自动认领可开始任务。
+// 迭代原因：S16 的 SpawnPersistent 只能等 Lead 或协议消息唤醒，teammate 不会主动寻找任务板上的工作。
+// 与旧函数差别：SpawnLimited 最多 10 轮后退出；SpawnPersistent 无工具调用时只等 inbox；SpawnAutonomous 在等待 inbox 的同时会扫描并认领 unclaimed task。
+func (s *Spawner) SpawnAutonomous(
+	ctx context.Context,
+	name string,
+	role string,
+	initialPrompt string,
+) (string, error) {
+	name, role, initialPrompt, reserved, err := s.reserveTeammate(
+		name,
+		role,
+		initialPrompt,
+	)
+	if err != nil {
+		return "", err
+	}
+	if !reserved {
+		return fmt.Sprintf("Teammate %q already exists", name), nil
+	}
+
+	system := teammateAutonomousSystemPrompt(name, role)
+
+	go s.runAutonomousTeammate(ctx, name, role, system, initialPrompt)
+
+	fmt.Printf(
+		"  \033[36m[teammate] %s spawned as %s (autonomous)\033[0m\n",
+		name,
+		role,
+	)
+
+	return fmt.Sprintf("Teammate %q spawned as %s (autonomous)", name, role), nil
+}
+
 // HasActive 对标 Python active_teammates 非空判断。
 //
 // 用于 Lead 侧只在所有 teammate 完成且 inbox/background 已清空后打印完成提示。
@@ -181,6 +244,21 @@ func teammateSystemPrompt(name string, role string, persistent bool) string {
 	}
 
 	return prompt
+}
+
+// teammateAutonomousSystemPrompt 构造 S17 teammate system prompt。
+//
+// 迭代原因：S17 teammate 需要知道自己可以在 idle 时查看任务板，而 S16 prompt 只描述 submit_plan / shutdown 协议。
+// 与旧函数差别：teammateSystemPrompt(persistent=true) 只要求等待 inbox 和处理协议；teammateAutonomousSystemPrompt 额外强调 task board auto-claim。
+func teammateAutonomousSystemPrompt(name string, role string) string {
+	return fmt.Sprintf(
+		"You are %q, a %s. Use tools to complete tasks. Send results via send_message to 'lead'. "+
+			"When asked for a plan, use submit_plan and wait for plan_approval_response before continuing. "+
+			"When shutdown_request arrives, stop gracefully. "+
+			"When idle, inspect the task board, claim unowned unblocked tasks for yourself, complete them, and report progress.",
+		name,
+		role,
+	)
 }
 
 func (s *Spawner) markDone(name string) {
@@ -292,6 +370,85 @@ func (s *Spawner) runPersistentTeammate(
 
 		var shouldContinue bool
 		messages, shouldContinue = s.waitForPersistentInbox(ctx, name, messages)
+		if !shouldContinue {
+			break
+		}
+	}
+
+	s.sendSummary(name, messages)
+}
+
+// runAutonomousTeammate 对标 Python S17 teammate lifecycle。
+//
+// 迭代原因：S16 的 runPersistentTeammate 没有任务板自驱阶段，模型一旦没有工具调用就只能等待下一封 inbox。
+// 与旧函数差别：runPersistentTeammate 的 idle 只处理 inbox；runAutonomousTeammate 在每段 WORK 后进入 idlePollAutonomous，能从任务板自动拿新任务继续工作。
+func (s *Spawner) runAutonomousTeammate(
+	ctx context.Context,
+	name string,
+	role string,
+	system string,
+	initialPrompt string,
+) {
+	defer s.finishTeammate(name)
+
+	toolbox, chatTools, err := s.teammateToolbox(name)
+	if err != nil {
+		_ = s.bus.Send(name, "lead", "Failed to initialize teammate tools: "+err.Error(), "error")
+		return
+	}
+
+	messages := []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(initialPrompt),
+	}
+
+	for {
+		messages = ensureTeammateIdentity(messages, name, role)
+
+		shouldStop := false
+
+		for round := 0; round < teammateMaxRounds; round++ {
+			inbox, err := s.bus.ReadInbox(name)
+			if err == nil && len(inbox) > 0 {
+				var shouldRun bool
+
+				messages, shouldRun, shouldStop = s.applyPersistentInbox(
+					name,
+					messages,
+					inbox,
+				)
+				if shouldStop {
+					break
+				}
+				if !shouldRun {
+					continue
+				}
+			}
+
+			var usedTools bool
+
+			messages, usedTools, err = s.runOneTeammateTurn(
+				ctx,
+				system,
+				messages,
+				toolbox,
+				chatTools,
+			)
+			if err != nil {
+				_ = s.bus.Send(name, "lead", "Teammate error: "+err.Error(), "error")
+				return
+			}
+
+			if !usedTools {
+				break
+			}
+		}
+
+		if shouldStop {
+			break
+		}
+
+		var shouldContinue bool
+		messages, shouldContinue = s.idlePollAutonomous(ctx, name, role, messages)
 		if !shouldContinue {
 			break
 		}
@@ -412,6 +569,130 @@ func (s *Spawner) waitForPersistentInbox(
 	}
 }
 
+// idlePollAutonomous 对标 Python S17 idle_poll。
+//
+// IDLE 阶段每 5 秒优先检查 inbox，其次扫描任务板并尝试认领可开始任务。
+// 迭代原因：S17 要把 teammate 从“被 Lead 分配任务”推进到“空闲时自己找任务”。
+// 与旧函数差别：waitForPersistentInbox 永远只读 inbox；idlePollAutonomous 先读 inbox，再调用 claimNextAutonomousTask 扫描任务板，并带 60 秒 idle timeout。
+func (s *Spawner) idlePollAutonomous(
+	ctx context.Context,
+	name string,
+	role string,
+	messages []openai.ChatCompletionMessageParamUnion,
+) ([]openai.ChatCompletionMessageParamUnion, bool) {
+	ticker := time.NewTicker(teammateAutonomousIdlePollInterval)
+	defer ticker.Stop()
+
+	timeout := time.NewTimer(teammateAutonomousIdleTimeout)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return messages, false
+
+		case <-timeout.C:
+			fmt.Printf(
+				"  \033[31m[idle] %s timeout (%s)\033[0m\n",
+				name,
+				teammateAutonomousIdleTimeout,
+			)
+
+			return messages, false
+
+		case <-ticker.C:
+			inbox, err := s.bus.ReadInbox(name)
+			if err == nil && len(inbox) > 0 {
+				var shouldRun bool
+				var shouldStop bool
+
+				messages, shouldRun, shouldStop = s.applyPersistentInbox(
+					name,
+					messages,
+					inbox,
+				)
+				if shouldStop {
+					return messages, false
+				}
+				if shouldRun {
+					fmt.Printf(
+						"  \033[36m[idle] %s found inbox work\033[0m\n",
+						name,
+					)
+
+					return ensureTeammateIdentity(messages, name, role), true
+				}
+			}
+
+			task, claimed, err := s.claimNextAutonomousTask(name)
+			if err != nil {
+				fmt.Printf(
+					"  \033[33m[idle] %s scan failed: %v\033[0m\n",
+					name,
+					err,
+				)
+
+				continue
+			}
+			if !claimed {
+				continue
+			}
+
+			messages = append(
+				messages,
+				openai.UserMessage(fmt.Sprintf(
+					"[Autonomous task claimed]\nTask %s: %s\n\n%s",
+					task.ID,
+					task.Subject,
+					task.Description,
+				)),
+			)
+
+			fmt.Printf(
+				"  \033[32m[idle] %s auto-claimed: %s\033[0m\n",
+				name,
+				task.Subject,
+			)
+
+			return ensureTeammateIdentity(messages, name, role), true
+		}
+	}
+}
+
+// claimNextAutonomousTask 从任务板中认领一个 S17 autonomous task。
+//
+// 迭代原因：idlePollAutonomous 需要一个可复用的小步骤，把“扫描候选任务”和“带 owner 检查认领”合在一起。
+// 与旧函数差别：旧路径由模型显式调用 claim_task；这里由 Spawner 在 idle 阶段自动调用 Board.ScanUnclaimed 和 ClaimWithOwnerCheck。
+func (s *Spawner) claimNextAutonomousTask(name string) (tasks.Task, bool, error) {
+	if strings.TrimSpace(s.board.Dir) == "" {
+		return tasks.Task{}, false, nil
+	}
+
+	unclaimed, err := s.board.ScanUnclaimed()
+	if err != nil {
+		return tasks.Task{}, false, err
+	}
+
+	for _, task := range unclaimed {
+		result, err := s.board.ClaimWithOwnerCheck(task.ID, name)
+		if err != nil {
+			return tasks.Task{}, false, err
+		}
+
+		if strings.Contains(result, "Claimed") {
+			return task, true, nil
+		}
+
+		fmt.Printf(
+			"  \033[33m[idle] %s claim skipped: %s\033[0m\n",
+			name,
+			result,
+		)
+	}
+
+	return tasks.Task{}, false, nil
+}
+
 func (s *Spawner) applyPersistentInbox(
 	name string,
 	messages []openai.ChatCompletionMessageParamUnion,
@@ -440,7 +721,7 @@ func (s *Spawner) applyPersistentInbox(
 
 		case "plan_approval_response":
 			reqID := MetaString(msg.Metadata, "request_id")
-			approved := metaBool(msg.Metadata, "approve")
+			approved := MetaBool(msg.Metadata, "approve")
 			status := "rejected"
 			if approved {
 				status = "approved"
@@ -517,6 +798,34 @@ func appendInboxMessage(
 	return append(
 		messages,
 		openai.UserMessage("[Inbox]\n"+string(raw)),
+	)
+}
+
+// ensureTeammateIdentity 对标 Python S17 压缩后身份重注入。
+//
+// 迭代原因：autonomous teammate 可能经历多轮 WORK/IDLE，历史被裁剪后容易忘记自己的 name/role。
+// 与旧函数差别：S15/S16 teammate 只依赖 system prompt 和最近消息；S17 在消息历史中补一条 identity user message，让 safeRecent 后仍保留身份锚点。
+func ensureTeammateIdentity(
+	messages []openai.ChatCompletionMessageParamUnion,
+	name string,
+	role string,
+) []openai.ChatCompletionMessageParamUnion {
+	for i := len(messages) - 1; i >= 0 && i >= len(messages)-5; i-- {
+		if strings.Contains(
+			openaiadapter.MessageTextContent(messages[i]),
+			"<teammate_identity>",
+		) {
+			return messages
+		}
+	}
+
+	return append(
+		messages,
+		openai.UserMessage(fmt.Sprintf(
+			"<teammate_identity>You are %q, role: %s. Keep this identity after context trimming or compaction.</teammate_identity>",
+			name,
+			role,
+		)),
 	)
 }
 

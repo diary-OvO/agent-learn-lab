@@ -54,6 +54,29 @@ func ToolGatedSectionV2(key string, text string, toolNames ...string) SectionV2 
 	}
 }
 
+// AllToolsGatedSectionV2 创建一个需要全部指定工具都启用的固定 section。
+//
+// 迭代原因：S17 的 autonomous teammate 不是单个工具能力，而是
+// spawn_teammate、list_tasks、claim_task 共同成立时才存在的协作语义。
+//
+// 与旧函数差别：ToolGatedSectionV2 只要任意一个工具启用就会注入说明，
+// 适合 S16 request/review 这类单工具触发语义；这里必须全部工具都启用，
+// 避免只开启 spawn_teammate 时误提示 teammate 会自动认领任务板。
+func AllToolsGatedSectionV2(key string, text string, toolNames ...string) SectionV2 {
+	return SectionV2{
+		Key:       key,
+		Signature: text + "|all_tools:" + strings.Join(toolNames, ","),
+		Build: func(ctx PromptContext) (string, bool) {
+			value := strings.TrimSpace(text)
+			if value == "" || !hasAllEnabledToolsV2(ctx.EnabledTools, toolNames) {
+				return "", false
+			}
+
+			return value, true
+		},
+	}
+}
+
 // ToolsSectionV2 对标 Python PROMPT_SECTIONS["tools"]。
 //
 // 根据真实启用工具动态渲染工具列表；没有工具时跳过。
@@ -176,6 +199,29 @@ func S16SectionsV2() []SectionV2 {
 	)
 }
 
+// S17SectionsV2 对标 Python S17 PROMPT_SECTIONS 增量。
+//
+// 迭代原因：S17 在 S16 protocol 之上新增 autonomous agent 行为，
+// teammate 空闲时会自己检查任务板并认领可执行任务，需要 prompt 明确这层语义。
+//
+// 与旧函数差别：S16SectionsV2 只解释 request_shutdown/request_plan/review_plan
+// 的协议闭环；S17SectionsV2 保留 S16 协议说明，并额外追加任务板自驱规则。
+func S17SectionsV2() []SectionV2 {
+	sections := S16SectionsV2()
+
+	return InsertSectionAfterV2(
+		sections,
+		"team_protocol",
+		AllToolsGatedSectionV2(
+			"autonomous_team",
+			"Autonomous teammate 规则：spawn_teammate 启动的 teammate 会在 WORK 完成后进入 IDLE；IDLE 阶段每 5 秒检查 inbox 和任务板，优先处理 shutdown_request，其次自动认领 pending、无 owner、依赖已完成的任务。Lead 只需要创建任务并启动 teammate，不必逐个分配。",
+			"spawn_teammate",
+			"list_tasks",
+			"claim_task",
+		),
+	)
+}
+
 // InsertSectionAfterV2 对标 Python sections.append / 插入 prompt section。
 //
 // 课程可以在基础列表中的指定 section 后插入自己的新增片段。
@@ -250,6 +296,12 @@ func (c *CacheV2) Get(
 	return c.lastPrompt
 }
 
+// sectionCacheKeysV2 为 V2 prompt cache 生成 section 维度的 key。
+//
+// 迭代原因：V2 允许不同课程选择不同 section 列表，仅比较 PromptContext
+// 会让 S15/S16/S17 在相同上下文下错误复用 prompt。
+//
+// 与旧函数差别：旧版缓存只关心 context；这里把 section key 和签名一起纳入缓存。
 func sectionCacheKeysV2(sections []SectionV2) []string {
 	keys := make([]string, 0, len(sections))
 
@@ -260,6 +312,12 @@ func sectionCacheKeysV2(sections []SectionV2) []string {
 	return keys
 }
 
+// hasAnyEnabledToolV2 判断给定工具中是否至少有一个真实启用。
+//
+// 迭代原因：V2 prompt section 可以绑定到工具状态，工具被裁剪时对应说明也应消失。
+//
+// 与 hasAllEnabledToolsV2 差别：这里是“任意一个即可”，用于 S16 协议工具这类
+// 单工具即可解释的 section；S17 autonomous section 则需要全部工具都存在。
 func hasAnyEnabledToolV2(enabledTools []string, names []string) bool {
 	if len(names) == 0 {
 		return true
@@ -276,6 +334,38 @@ func hasAnyEnabledToolV2(enabledTools []string, names []string) bool {
 	return false
 }
 
+// hasAllEnabledToolsV2 判断给定工具是否全部真实启用。
+//
+// 迭代原因：S17 autonomous teammate 的 prompt 说明依赖一组工具共同可用，
+// 只要缺少任务列表或认领工具，就不应该向模型承诺自动任务板能力。
+//
+// 与 hasAnyEnabledToolV2 差别：旧 helper 是宽松门控，适合任一工具触发的说明；
+// 这个 helper 是严格门控，适合跨工具组合能力。
+func hasAllEnabledToolsV2(enabledTools []string, names []string) bool {
+	if len(names) == 0 {
+		return true
+	}
+
+	enabled := make(map[string]bool, len(enabledTools))
+	for _, tool := range enabledTools {
+		enabled[tool] = true
+	}
+
+	for _, name := range names {
+		if !enabled[name] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// enabledSectionKeysV2 返回本次实际注入 prompt 的 section key。
+//
+// 迭代原因：V2 section 可以动态跳过，调试时需要看到最终启用的课程片段。
+//
+// 与旧版差别：旧版 prompt section 固定，打印一次组装结果即可；V2 需要根据
+// Build 结果反查哪些 section 真正进入了 system prompt。
 func enabledSectionKeysV2(
 	ctx PromptContext,
 	sections []SectionV2,

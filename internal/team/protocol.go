@@ -395,7 +395,7 @@ func ConsumeLeadInbox(
 			continue
 		}
 
-		approve := metaBool(msg.Metadata, "approve")
+		approve := MetaBool(msg.Metadata, "approve")
 
 		if book != nil {
 			book.MatchResponse(msg.Type, reqID, approve)
@@ -405,6 +405,13 @@ func ConsumeLeadInbox(
 	return messages, nil
 }
 
+// MetaString 从 message metadata 中读取 string 值。
+//
+// 迭代原因：S16/S17 协议消息依赖 request_id 等 metadata，调用方不应散落
+// map[string]any 的类型断言和 strings.TrimSpace 细节。
+//
+// 与直接读 map 差别：这里统一处理 nil、缺失字段、非 string 值和空白裁剪，
+// 让 ConsumeLeadInbox、Spawner 等调用点保持协议语义清晰。
 func MetaString(meta map[string]any, key string) string {
 	if meta == nil {
 		return ""
@@ -423,7 +430,14 @@ func MetaString(meta map[string]any, key string) string {
 	}
 }
 
-func metaBool(meta map[string]any, key string) bool {
+// MetaBool 从 message metadata 中读取 bool 值。
+//
+// 迭代原因：S17 Spawner 需要在 teammate 内部读取 plan_approval_response
+// 的 approve 字段；原来的 metaBool 是 protocol.go 私有 helper，无法被 spawner.go 复用。
+//
+// 与旧函数差别：MetaBool 是导出版，供 team 包内多个文件共享；旧 metaBool
+// 保留为兼容 wrapper，避免改动仍按旧私有函数名调用的 S16 逻辑。
+func MetaBool(meta map[string]any, key string) bool {
 	if meta == nil {
 		return false
 	}
@@ -441,4 +455,13 @@ func metaBool(meta map[string]any, key string) bool {
 	default:
 		return false
 	}
+}
+
+// metaBool 保留旧的私有函数名。
+//
+// 迭代原因：S17 需要导出 MetaBool，但不应该为了导出 helper 而强制所有旧调用点同步改名。
+//
+// 与 MetaBool 差别：它不再承载独立逻辑，只是把旧名称转发到新实现。
+func metaBool(meta map[string]any, key string) bool {
+	return MetaBool(meta, key)
 }
