@@ -14,11 +14,12 @@ import (
 //
 // 表示一个 agent 发给另一个 agent 的 inbox 消息。
 type Message struct {
-	From    string  `json:"from"`
-	To      string  `json:"to"`
-	Content string  `json:"content"`
-	Type    string  `json:"type"`
-	Ts      float64 `json:"ts"`
+	From     string         `json:"from"`
+	To       string         `json:"to"`
+	Content  string         `json:"content"`
+	Type     string         `json:"type"`
+	Ts       float64        `json:"ts"`
+	Metadata map[string]any `json:"metadata"`
 }
 
 // MessageBus 对标 Python MessageBus。
@@ -44,14 +45,27 @@ func NewMessageBus(workDir string) (*MessageBus, error) {
 	}, nil
 }
 
-// Send 对标 Python MessageBus.send。
+// Send 对标 S15 MessageBus.send 的普通消息形式。
 //
-// 追加一行 JSON 到目标 agent 的 inbox 文件中。
+// 不带 metadata，适合普通 teammate 消息。
 func (b *MessageBus) Send(
 	fromAgent string,
 	toAgent string,
 	content string,
 	msgType string,
+) error {
+	return b.SendWithMetadata(fromAgent, toAgent, content, msgType, nil)
+}
+
+// SendWithMetadata 对标 S16 MessageBus.send(..., metadata={...})。
+//
+// 用于发送 shutdown_request、plan_approval_response 等带 request_id 的协议消息。
+func (b *MessageBus) SendWithMetadata(
+	fromAgent string,
+	toAgent string,
+	content string,
+	msgType string,
+	metadata map[string]any,
 ) error {
 
 	fromAgent = strings.TrimSpace(fromAgent)
@@ -70,11 +84,12 @@ func (b *MessageBus) Send(
 	}
 
 	msg := Message{
-		From:    fromAgent,
-		To:      toAgent,
-		Content: content,
-		Type:    msgType,
-		Ts:      float64(time.Now().UnixNano()) / 1e9,
+		From:     fromAgent,
+		To:       toAgent,
+		Content:  content,
+		Type:     msgType,
+		Ts:       float64(time.Now().UnixNano()) / 1e9,
+		Metadata: metadata,
 	}
 
 	raw, err := json.Marshal(msg)
@@ -101,9 +116,10 @@ func (b *MessageBus) Send(
 	}
 
 	fmt.Printf(
-		"  \033[33m[bus] %s → %s: %s\033[0m\n",
+		"  \033[33m[bus] %s → %s: (%s) %s\033[0m\n",
 		fromAgent,
 		toAgent,
+		msgType,
 		previewRunes(content, 50),
 	)
 

@@ -13,29 +13,30 @@ import (
 	v2 "AgentLoop/internal/toolkit/v2"
 )
 
-// InitS15Hooks 对标 S15 继承 S14 hook。
+// InitS16Hooks 对标 S16 继承 S15 hooks。
 //
-// S15 新增 teammate 消息协作，但不新增 hook 类型或 hook 执行时机。
-func InitS15Hooks(
+// S16 新增 team protocol，不新增 hook 类型。
+func InitS16Hooks(
 	hookBus *hooks.HookBus,
 	checker *permission.PermissionChecker,
 	workDir string,
 ) {
-	InitS14Hooks(hookBus, checker, workDir)
+	InitS15Hooks(hookBus, checker, workDir)
 }
 
-// InitS15SubToolbox 对标 S15 中既有 task subagent 仍沿用 S14。
+// InitS16SubToolbox 对标 S16 常规 subagent 仍沿用 S15。
 //
-// task 工具的同步 subagent 不参与 MessageBus，避免两种 agent 概念混在一起。
-func InitS15SubToolbox() *v2.ToolBox {
-	return InitS14SubToolbox()
+// task 工具启动的是同步子 Agent；team teammate 的协议工具由 InitS16TeammateToolbox 单独组装。
+func InitS16SubToolbox() *v2.ToolBox {
+	return InitS15SubToolbox()
 }
 
-// InitS15TeammateToolbox 对标 Python spawn_teammate_thread 里的 sub_tools。
+// InitS16TeammateToolbox 对标 Python S16 teammate sub_tools。
 //
-// teammate 只拿 bash/read_file/write_file/send_message，保持教学版团队协作最小闭环。
-func InitS15TeammateToolbox(
+// 相比 S15 teammate，新增 submit_plan，用于向 Lead 发起 plan_approval_request。
+func InitS16TeammateToolbox(
 	messageBus *team.MessageBus,
+	protocolBook *team.ProtocolBook,
 	agentName string,
 ) *v2.ToolBox {
 	return v2.NewToolBox(
@@ -43,19 +44,21 @@ func InitS15TeammateToolbox(
 		tools.NewReadFileToolV2(),
 		tools.NewWriteFileToolV2(),
 		tools.NewSendMessageToolV2(messageBus, agentName),
+		tools.NewSubmitPlanToolV2(messageBus, protocolBook, agentName),
 	)
 }
 
-// InitS15Toolbox 对标 Python S15 TOOLS。
+// InitS16Toolbox 对标 Python S16 TOOLS。
 //
-// 在 S14 cron/background/task 工具基础上新增 spawn_teammate、send_message、check_inbox。
-func InitS15Toolbox(
+// 在 S15 工具基础上切换为 persistent teammate，并新增 request_shutdown、request_plan、review_plan。
+func InitS16Toolbox(
 	subAgent *subagent.SubAgent,
 	skillRegistry *skills.Registry,
 	taskBoard tasks.Board,
 	cronScheduler *cron.Scheduler,
 	spawner *team.Spawner,
 	messageBus *team.MessageBus,
+	protocolBook *team.ProtocolBook,
 ) *v2.ToolBox {
 	return v2.NewToolBox(
 		tools.NewWeatherToolV2(),
@@ -80,8 +83,13 @@ func InitS15Toolbox(
 		tools.NewListCronsToolV2(cronScheduler),
 		tools.NewCancelCronToolV2(cronScheduler),
 
-		tools.NewSpawnLimitedTeammateToolV2(spawner),
+		tools.NewSpawnPersistentTeammateToolV2(spawner),
 		tools.NewSendMessageToolV2(messageBus, "lead"),
-		tools.NewCheckInboxToolV2(messageBus, nil),
+		tools.NewCheckInboxToolV2(messageBus, protocolBook),
+
+		// S16 新增：Lead protocol tools。
+		tools.NewRequestShutdownToolV2(messageBus, protocolBook),
+		tools.NewRequestPlanToolV2(messageBus, protocolBook),
+		tools.NewReviewPlanToolV2(messageBus, protocolBook),
 	)
 }
