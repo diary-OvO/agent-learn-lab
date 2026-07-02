@@ -245,6 +245,26 @@ func S18SectionsV2() []SectionV2 {
 	)
 }
 
+// S19SectionsV2 对标 Python S19 PROMPT_SECTIONS 增量。
+//
+// 迭代原因：S19 在 S18 worktree isolation 之上新增 MCP tool discovery，模型需要知道
+// connect_mcp 会让后续请求出现 mcp__{server}__{tool} 命名的动态工具。
+//
+// 与 S18SectionsV2 差别：S18 只解释 worktree 隔离；S19 额外解释 MCP 连接、工具前缀和风险标注。
+func S19SectionsV2() []SectionV2 {
+	sections := S18SectionsV2()
+
+	return InsertSectionAfterV2(
+		sections,
+		"worktree_isolation",
+		ToolGatedSectionV2(
+			"mcp_tools",
+			"MCP 规则：使用 connect_mcp 连接教学版 MCP server。连接后，MCP tools 会动态出现在工具列表中，命名格式为 mcp__{server}__{tool}。readOnly 工具可直接用于查询；destructive 工具需要像其他破坏性操作一样谨慎，并遵守权限 hook。",
+			"connect_mcp",
+		),
+	)
+}
+
 // InsertSectionAfterV2 对标 Python sections.append / 插入 prompt section。
 //
 // 课程可以在基础列表中的指定 section 后插入自己的新增片段。
